@@ -1,0 +1,50 @@
+# 后端
+target/
+*.jar
+*.war
+*.class
+.idea/
+*.iml
+.vscode/
+HELP.md
+.mvn/
+mvnw
+mvnw.cmd
+
+# 前端
+node_modules/
+dist/
+.DS_Store
+.env.local
+.env.*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.local
+.vscode/*
+
+# 数据库
+*.sql.bak
+
+# 日志
+logs/
+*.log
+
+# 大数据
+flink/logs/
+hadoop/logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 浏览器驱动（二进制文件）
+chromedriver-win64/
+
+# 临时文件
+*.tmp
+
+# IDE
+.codebuddy/

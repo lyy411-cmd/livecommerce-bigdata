@@ -1,0 +1,126 @@
+version: '3.8'
+
+# ============================================
+# 星播大数据分析平台 - 一键启动所有组件
+# ============================================
+services:
+  # MySQL 主库
+  mysql:
+    image: mysql:8.0
+    container_name: lc-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: livecommerce_db
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./sql/livecommerce_db.sql:/docker-entrypoint-initdb.d/init.sql
+    command: --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Zookeeper
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: lc-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  # Kafka
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: lc-kafka
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    ports:
+      - "9092:9092"
+
+  # Hadoop HDFS (NameNode)
+  namenode:
+    image: apache/hadoop:3.3.6
+    container_name: lc-namenode
+    command: ["hdfs", "namenode"]
+    environment:
+      - ENSURE_NAMENODE_DIR=/tmp/hadoop-root/dfs/name
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - hadoop_namenode:/tmp/hadoop-root/dfs/name
+
+  # Hadoop HDFS (DataNode)
+  datanode:
+    image: apache/hadoop:3.3.6
+    container_name: lc-datanode
+    command: ["hdfs", "datanode"]
+    environment:
+      - ENSURE_DATANODE_DIR=/tmp/hadoop-root/dfs/data
+    depends_on:
+      - namenode
+    ports:
+      - "9864:9864"
+    volumes:
+      - hadoop_datanode:/tmp/hadoop-root/dfs/data
+
+  # Hive Metastore
+  hive-metastore:
+    image: apache/hive:3.1.3
+    container_name: lc-hive-metastore
+    command: /opt/hive/bin/hive --service metastore
+    environment:
+      - SERVICE_NAME=metastore
+    ports:
+      - "9083:9083"
+    depends_on:
+      - mysql
+
+  # HiveServer2
+  hiveserver2:
+    image: apache/hive:3.1.3
+    container_name: lc-hiveserver2
+    command: /opt/hive/bin/hive --service hiveserver2
+    environment:
+      - SERVICE_NAME=hiveserver2
+    ports:
+      - "10000:10000"
+    depends_on:
+      - hive-metastore
+
+  # Flink JobManager
+  flink-jobmanager:
+    image: flink:1.17
+    container_name: lc-flink-jobmanager
+    environment:
+      - FLINK_PROPERTIES=jobmanager.rpc.address: flink-jobmanager
+    ports:
+      - "8081:8081"
+    command: jobmanager
+
+  # Flink TaskManager
+  flink-taskmanager:
+    image: flink:1.17
+    container_name: lc-flink-taskmanager
+    environment:
+      - FLINK_PROPERTIES=jobmanager.rpc.address: flink-jobmanager
+    depends_on:
+      - flink-jobmanager
+    command: taskmanager
+
+volumes:
+  mysql_data:
+  hadoop_namenode:
+  hadoop_datanode:
