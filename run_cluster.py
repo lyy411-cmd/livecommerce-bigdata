@@ -1084,6 +1084,35 @@ class APIHandler(BaseHTTPRequestHandler):
                 self._send({'code': 0, 'data': True, 'msg': '已删除'})
             except Exception as e:
                 self._send({'code': 500, 'msg': f'删除失败: {e}'}, 500)
+
+        elif p == '/api/livecommerce/room/delete':
+            rid = qs.get('id', [None])[0]
+            if not rid:
+                self._send({'code': 400, 'msg': '缺少ID'}, 400); return
+            try:
+                conn = pymysql.connect(host=VMS['mysql'].split(':')[0], port=3306, user=USER, password=PWD, database=DB_NAME, charset='utf8mb4', connect_timeout=5)
+                cur = conn.cursor()
+                cur.execute("UPDATE live_room SET deleted=1 WHERE id=%s", (int(rid),))
+                conn.commit()
+                conn.close()
+                self._send({'code': 0, 'data': True, 'msg': '直播间已删除'})
+            except Exception as e:
+                self._send({'code': 500, 'msg': f'删除失败: {e}'}, 500)
+
+        elif p == '/api/livecommerce/anchor/delete':
+            aid = qs.get('id', [None])[0]
+            if not aid:
+                self._send({'code': 400, 'msg': '缺少ID'}, 400); return
+            try:
+                conn = pymysql.connect(host=VMS['mysql'].split(':')[0], port=3306, user=USER, password=PWD, database=DB_NAME, charset='utf8mb4', connect_timeout=5)
+                cur = conn.cursor()
+                cur.execute("UPDATE anchor SET deleted=1 WHERE id=%s", (int(aid),))
+                conn.commit()
+                conn.close()
+                self._send({'code': 0, 'data': True, 'msg': '主播已删除'})
+            except Exception as e:
+                self._send({'code': 500, 'msg': f'删除失败: {e}'}, 500)
+
         else:
             self._send({"code": 0, "data": True, "msg": "deleted"})
 
