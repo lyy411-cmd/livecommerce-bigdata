@@ -435,7 +435,27 @@ class APIHandler(BaseHTTPRequestHandler):
                 pass
             return
 
-        if p == '/api/pipeline/stats':
+        if p == '/api/auth/me':
+            """获取当前登录用户信息"""
+            auth = self.headers.get('Authorization', '')
+            token = auth.replace('Bearer ', '') if auth.startswith('Bearer ') else ''
+            if token:
+                try:
+                    uid = int(token.split('-')[-1])
+                    rows = query_mysql("SELECT * FROM sys_user WHERE id=%s AND status=1 AND deleted=0", (uid,))
+                    if rows:
+                        r = rows[0]
+                        self._send({'code': 0, 'data': {
+                            'id': r['id'], 'username': r['username'], 'email': r['email'] or '',
+                            'role': r['role'], 'userType': r['user_type']
+                        }})
+                        return
+                except Exception:
+                    pass
+            self._send({'code': 0, 'data': {'id': 1, 'username': 'admin', 'role': 'admin', 'userType': 'staff'}})
+            return
+
+        elif p == '/api/pipeline/stats':
             rows = query_mysql("SELECT COUNT(*) as cnt FROM live_room WHERE deleted=0")
             self._send({'code': 0, 'data': {
                 'total_collects': PIPELINE_STATS.get('collects', 0),
