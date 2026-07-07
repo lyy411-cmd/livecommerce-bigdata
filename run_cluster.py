@@ -907,6 +907,31 @@ class APIHandler(BaseHTTPRequestHandler):
                     'output': output + '\n' + err,
                     'stats': dict(PIPELINE_STATS)
                 }})
+        elif p == '/api/livecommerce/order/create':
+            """创建订单（测试用，不会被模拟器影响）"""
+            prod = (body.get('productName') or '测试商品').strip()
+            room = (body.get('roomName') or '测试直播间').strip()
+            user = (body.get('username') or '测试买家').strip()
+            qty = int(body.get('quantity') or 1)
+            amount = float(body.get('totalAmount') or 0)
+            plat = (body.get('platform') or 'douyin').strip()
+            if not prod or not room:
+                self._send({'code': 400, 'msg': '商品名和直播间名不能为空'}, 400); return
+            try:
+                import time as _time
+                conn = pymysql.connect(host=VMS['mysql'].split(':')[0], port=3306, user=USER, password=PWD, database=DB_NAME, charset='utf8mb4', connect_timeout=5)
+                cur = conn.cursor()
+                order_no = f"TEST{int(_time.time())}"
+                cur.execute(
+                    "INSERT INTO order_info (order_no, product_name, room_name, username, quantity, total_amount, platform, status, create_time) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',NOW())",
+                    (order_no, prod, room, user, qty, amount, plat))
+                oid = cur.lastrowid
+                conn.commit()
+                conn.close()
+                self._send({'code': 0, 'data': {'id': oid, 'orderNo': order_no}, 'msg': '创建成功'})
+            except Exception as e:
+                self._send({'code': 500, 'msg': f'创建失败: {e}'}, 500)
+
         elif p.startswith('/api/livecommerce/order/'):
             """订单状态变更：pay/ship/confirm/cancel/refund"""
             action = p.split('/')[-1]
@@ -982,31 +1007,6 @@ class APIHandler(BaseHTTPRequestHandler):
                 self._send({'code': 0, 'data': {'id': oid_int, 'status': new_status}, 'msg': msg})
             except Exception as e:
                 self._send({'code': 500, 'msg': f'操作失败: {e}'}, 500)
-
-        elif p == '/api/livecommerce/order/create':
-            """创建订单（测试用，不会被模拟器影响）"""
-            prod = (body.get('productName') or '测试商品').strip()
-            room = (body.get('roomName') or '测试直播间').strip()
-            user = (body.get('username') or '测试买家').strip()
-            qty = int(body.get('quantity') or 1)
-            amount = float(body.get('totalAmount') or 0)
-            plat = (body.get('platform') or 'douyin').strip()
-            if not prod or not room:
-                self._send({'code': 400, 'msg': '商品名和直播间名不能为空'}, 400); return
-            try:
-                import time as _time
-                conn = pymysql.connect(host=VMS['mysql'].split(':')[0], port=3306, user=USER, password=PWD, database=DB_NAME, charset='utf8mb4', connect_timeout=5)
-                cur = conn.cursor()
-                order_no = f"TEST{int(_time.time())}"
-                cur.execute(
-                    "INSERT INTO order_info (order_no, product_name, room_name, username, quantity, total_amount, platform, status, create_time) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',NOW())",
-                    (order_no, prod, room, user, qty, amount, plat))
-                oid = cur.lastrowid
-                conn.commit()
-                conn.close()
-                self._send({'code': 0, 'data': {'id': oid, 'orderNo': order_no}, 'msg': '创建成功'})
-            except Exception as e:
-                self._send({'code': 500, 'msg': f'创建失败: {e}'}, 500)
 
         elif p == '/api/system/user/create':
             """管理员创建员工账号"""
