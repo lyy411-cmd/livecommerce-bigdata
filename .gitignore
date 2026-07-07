@@ -48,3 +48,7 @@ chromedriver-win64/
 
 # IDE
 .codebuddy/
+
+# Office 临时文件
+~$*.docx
+~$*.xlsx
