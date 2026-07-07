@@ -1103,9 +1103,12 @@ class APIHandler(BaseHTTPRequestHandler):
             try:
                 conn = pymysql.connect(host=VMS['mysql'].split(':')[0], port=3306, user=USER, password=PWD, database=DB_NAME, charset='utf8mb4', connect_timeout=5)
                 cur = conn.cursor()
-                cur.execute("UPDATE sys_user SET deleted=1 WHERE id=%s", (int(uid),))
+                cur.execute("UPDATE sys_user SET deleted=1 WHERE id=%s AND deleted=0", (int(uid),))
+                affected = cur.rowcount
                 conn.commit()
                 conn.close()
+                if affected == 0:
+                    self._send({'code': 404, 'msg': '用户不存在'}, 404); return
                 self._send({'code': 0, 'data': True, 'msg': '已删除'})
             except Exception as e:
                 self._send({'code': 500, 'msg': f'删除失败: {e}'}, 500)
@@ -1117,9 +1120,12 @@ class APIHandler(BaseHTTPRequestHandler):
             try:
                 conn = pymysql.connect(host=VMS['mysql'].split(':')[0], port=3306, user=USER, password=PWD, database=DB_NAME, charset='utf8mb4', connect_timeout=5)
                 cur = conn.cursor()
-                cur.execute("UPDATE live_room SET deleted=1 WHERE id=%s", (int(rid),))
+                cur.execute("UPDATE live_room SET deleted=1 WHERE id=%s AND deleted=0", (int(rid),))
+                affected = cur.rowcount
                 conn.commit()
                 conn.close()
+                if affected == 0:
+                    self._send({'code': 404, 'msg': '直播间不存在'}, 404); return
                 self._send({'code': 0, 'data': True, 'msg': '直播间已删除'})
             except Exception as e:
                 self._send({'code': 500, 'msg': f'删除失败: {e}'}, 500)
@@ -1131,9 +1137,12 @@ class APIHandler(BaseHTTPRequestHandler):
             try:
                 conn = pymysql.connect(host=VMS['mysql'].split(':')[0], port=3306, user=USER, password=PWD, database=DB_NAME, charset='utf8mb4', connect_timeout=5)
                 cur = conn.cursor()
-                cur.execute("UPDATE anchor SET deleted=1 WHERE id=%s", (int(aid),))
+                cur.execute("UPDATE anchor SET deleted=1 WHERE id=%s AND deleted=0", (int(aid),))
+                affected = cur.rowcount
                 conn.commit()
                 conn.close()
+                if affected == 0:
+                    self._send({'code': 404, 'msg': '主播不存在'}, 404); return
                 self._send({'code': 0, 'data': True, 'msg': '主播已删除'})
             except Exception as e:
                 self._send({'code': 500, 'msg': f'删除失败: {e}'}, 500)
