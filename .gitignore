@@ -52,3 +52,6 @@ chromedriver-win64/
 # Office 临时文件
 ~$*.docx
 ~$*.xlsx
+
+# 旧版文档（不再跟踪）
+智慧直播电商大数据分析平台-软件工程文档.docx
