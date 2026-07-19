@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>星播弹幕捕获器</title>
+  <style>
+    body {
+      width: 320px;
+      font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 13px;
+      color: #333;
+      background: #fff;
+      margin: 0;
+      padding: 0;
+    }
+    header {
+      background: linear-gradient(135deg, #ff4e8a, #ff2e6e);
+      color: #fff;
+      padding: 14px 16px;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+    }
+    header .sub {
+      margin-top: 4px;
+      font-size: 11px;
+      opacity: 0.85;
+    }
+    .section {
+      padding: 12px 16px;
+      border-bottom: 1px solid #f0f0f0;
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 4px 0;
+    }
+    .row .k { color: #666; }
+    .row .v { font-weight: 500; color: #222; }
+    .dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+    .dot.on { background: #27c93f; box-shadow: 0 0 6px rgba(39,201,63,0.5); }
+    .dot.off { background: #ccc; }
+    .dot.warn { background: #ff9500; }
+    button {
+      width: 100%;
+      padding: 8px;
+      margin-top: 6px;
+      background: #ff2e6e;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    button:hover { background: #e5275f; }
+    button.ghost {
+      background: #fff;
+      color: #ff2e6e;
+      border: 1px solid #ff2e6e;
+    }
+    .hint {
+      font-size: 11px;
+      color: #888;
+      line-height: 1.5;
+      margin-top: 6px;
+    }
+    .status-card {
+      background: #fafafa;
+      border-radius: 6px;
+      padding: 10px 12px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>星播弹幕捕获器</h1>
+    <div class="sub" id="sub">等待连接到抖音直播间...</div>
+  </header>
+
+  <div class="section">
+    <div class="status-card">
+      <div class="row">
+        <span class="k">捕获状态</span>
+        <span class="v" id="captureStatus"><span class="dot off"></span>未激活</span>
+      </div>
+      <div class="row">
+        <span class="k">直播间 ID</span>
+        <span class="v" id="roomId">-</span>
+      </div>
+      <div class="row">
+        <span class="k">已捕获帧</span>
+        <span class="v" id="captured">0</span>
+      </div>
+      <div class="row">
+        <span class="k">已推送后端</span>
+        <span class="v" id="posted">0</span>
+      </div>
+      <div class="row">
+        <span class="k">后端连接</span>
+        <span class="v" id="backend"><span class="dot off"></span>未连接</span>
+      </div>
+    </div>
+
+    <button id="toggleBtn">启用捕获</button>
+    <button id="openRoomBtn" class="ghost">打开抖音直播</button>
+
+    <div class="hint">
+      使用方法：<br>
+      1. 启动后端服务 <code>start.bat</code><br>
+      2. 在 Chrome 中打开任意抖音直播间<br>
+      3. 捕获自动开始，弹幕实时推送至平台
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

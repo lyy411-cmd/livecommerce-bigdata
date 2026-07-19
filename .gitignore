@@ -56,3 +56,16 @@ chromedriver-win64/
 # 旧版文档（不再跟踪）
 智慧直播电商大数据分析平台-软件工程文档.docx
 智慧直播电商大数据分析平台-技术文档.docx
+
+# 爬虫数据（不应提交 - 含敏感信息和大缓存）
+data_pipeline/browser_profiles/
+data_pipeline/cookies/
+
+# 临时日志和调试输出
+backend_log.txt
+debug_page.txt
+ks_search_test.txt
+ks_test_result.txt
+
+# Chrome扩展开发临时产物（如需提交请移除此行）
+# chrome_extension/

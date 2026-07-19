@@ -42,7 +42,7 @@ services:
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://127.0.0.1:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://192.168.104.100:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
@@ -109,6 +109,8 @@ services:
     ports:
       - "8081:8081"
     command: jobmanager
+    volumes:
+      - ./flink_jobs/lib:/opt/flink/lib/custom
 
   # Flink TaskManager
   flink-taskmanager:
@@ -119,6 +121,8 @@ services:
     depends_on:
       - flink-jobmanager
     command: taskmanager
+    volumes:
+      - ./flink_jobs/lib:/opt/flink/lib/custom
 
 volumes:
   mysql_data:

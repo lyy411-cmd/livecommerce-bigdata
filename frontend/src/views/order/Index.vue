@@ -30,11 +30,6 @@
           <el-option label="已签收" value="delivered" />
           <el-option label="已取消" value="cancelled" />
         </el-select>
-        <el-select v-model="query.platform" placeholder="平台" clearable style="width:130px">
-          <el-option label="抖音" value="douyin" />
-          <el-option label="快手" value="kuaishou" />
-          <el-option label="淘宝" value="taobao" />
-        </el-select>
         <el-button type="primary" @click="onSearch">搜索</el-button>
         <el-button @click="onRefresh" class="refresh-btn">刷新</el-button>
         <div class="sse-status" :class="{ active: sseConnected }">
@@ -60,13 +55,6 @@
         <el-table-column prop="quantity" label="数量" width="60" align="center" />
         <el-table-column prop="totalAmount" label="金额" width="110" align="right">
           <template #default="{ row }">￥{{ Number(row.totalAmount).toLocaleString() }}</template>
-        </el-table-column>
-        <el-table-column prop="platform" label="平台" width="80" align="center">
-          <template #default="{ row }">
-            <el-tag :type="row.platform === 'taobao' ? 'warning' : row.platform === 'douyin' ? 'primary' : 'success'" size="small">
-              {{ {taobao:'淘宝', douyin:'抖音', kuaishou:'快手'}[row.platform] }}
-            </el-tag>
-          </template>
         </el-table-column>
         <el-table-column label="状态" width="100" align="center">
           <template #default="{ row }">
@@ -101,7 +89,7 @@ import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { getOrderPage, getOrderOverview } from '@/api'
 import { subscribeEvents } from '@/utils/sse'
 
-const query = reactive({ page: 1, pageSize: 100, status: '', platform: '' })
+const query = reactive({ page: 1, pageSize: 100, status: '' })
 const tableData = ref([])
 const initialLoading = ref(true)
 const stats = ref({})
@@ -155,7 +143,7 @@ const handleSSE = (event) => {
         id: event.oid, orderNo: event.orderNo, productName: event.productName || event.product,
         roomName: event.roomName || '', username: event.username || event.user || '',
         quantity: event.quantity || 1, totalAmount: event.totalAmount || event.amount || 0,
-        platform: event.platform || 'douyin', status: 'pending', createTime: event.createTime || ''
+        status: 'pending', createTime: event.createTime || ''
       })
     }
   } else if (event.type === 'order_paid') {
@@ -208,7 +196,7 @@ const silentRefresh = async () => {
 }
 
 const onSearch = () => fetchData()
-const onRefresh = () => { query.page = 1; query.status = ''; query.platform = ''; fetchData() }
+const onRefresh = () => { query.page = 1; query.status = ''; fetchData() }
 const onTabChange = () => {}
 
 const handleAction = async (row, action) => {

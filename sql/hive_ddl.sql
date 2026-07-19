@@ -113,3 +113,28 @@ CREATE EXTERNAL TABLE IF NOT EXISTS ads.ads_anchor_gmv_rank (
 PARTITIONED BY (dt STRING)
 STORED AS PARQUET
 LOCATION '/livecommerce/ads/ads_anchor_gmv_rank';
+
+-- ODS 层 - 弹幕事件
+CREATE EXTERNAL TABLE IF NOT EXISTS ods.ods_danmaku_event (
+    event_id STRING COMMENT '事件ID',
+    room_id STRING COMMENT '房间ID',
+    platform STRING COMMENT '平台',
+    user_name STRING COMMENT '用户名',
+    content STRING COMMENT '弹幕内容',
+    danmaku_type STRING COMMENT '类型: comment/gift/like/enter',
+    event_time BIGINT COMMENT '时间戳'
+)
+PARTITIONED BY (dt STRING COMMENT '日期分区')
+STORED AS PARQUET
+LOCATION '/livecommerce/ods/ods_danmaku_event';
+
+-- DWS 层 - 弹幕热词统计
+CREATE EXTERNAL TABLE IF NOT EXISTS dws.dws_danmaku_hotwords (
+    word STRING,
+    freq BIGINT,
+    platform STRING,
+    room_id STRING
+)
+PARTITIONED BY (dt STRING)
+STORED AS PARQUET
+LOCATION '/livecommerce/dws/dws_danmaku_hotwords';

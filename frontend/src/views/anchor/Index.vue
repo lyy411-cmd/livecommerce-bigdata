@@ -3,11 +3,6 @@
     <el-card>
       <div class="search-bar">
         <el-input v-model="query.search" placeholder="搜索姓名/昵称/类目" clearable style="width:200px" @keyup.enter="onSearch" />
-        <el-select v-model="query.platform" placeholder="平台" clearable style="width:140px">
-          <el-option label="抖音" value="douyin" />
-          <el-option label="快手" value="kuaishou" />
-          <el-option label="淘宝" value="taobao" />
-        </el-select>
         <el-select v-model="query.level" placeholder="等级" clearable style="width:140px">
           <el-option label="S级" value="S" />
           <el-option label="A级" value="A" />
@@ -21,13 +16,6 @@
       <el-table :data="tableData" stripe v-loading="loading" height="calc(100vh - 380px)" style="margin-top:16px">
         <el-table-column prop="name" label="姓名" width="100" />
         <el-table-column prop="nickname" label="昵称" width="100" />
-        <el-table-column prop="platform" label="平台" width="100">
-          <template #default="{ row }">
-            <el-tag :type="row.platform === 'taobao' ? 'warning' : row.platform === 'douyin' ? '' : 'success'" size="small">
-              {{ {taobao:'淘宝', douyin:'抖音', kuaishou:'快手'}[row.platform] || row.platform }}
-            </el-tag>
-          </template>
-        </el-table-column>
         <el-table-column prop="level" label="等级" width="80">
           <template #default="{ row }">
             <el-tag :type="row.level === 'S' ? 'danger' : row.level === 'A' ? 'warning' : 'info'">{{ row.level }}级</el-tag>
@@ -57,13 +45,6 @@
       <el-form :model="editing" label-width="100px">
         <el-form-item label="姓名"><el-input v-model="editing.name" /></el-form-item>
         <el-form-item label="昵称"><el-input v-model="editing.nickname" /></el-form-item>
-        <el-form-item label="平台">
-          <el-select v-model="editing.platform" style="width:100%">
-            <el-option label="抖音" value="douyin" />
-            <el-option label="快手" value="kuaishou" />
-            <el-option label="淘宝" value="taobao" />
-          </el-select>
-        </el-form-item>
         <el-form-item label="等级">
           <el-select v-model="editing.level" style="width:100%">
             <el-option label="S级" value="S" />
@@ -92,12 +73,12 @@
 import { ref, reactive, onMounted } from 'vue'
 import { getAnchorPage, createAnchor, updateAnchor, deleteAnchor } from '@/api'
 
-const query = reactive({ page: 1, pageSize: 10, platform: '', level: '', search: '' })
+const query = reactive({ page: 1, pageSize: 10, level: '', search: '' })
 const tableData = ref([])
 const total = ref(0)
 const loading = ref(false)
 const showCreate = ref(false)
-const editing = reactive({ id: null, name: '', nickname: '', platform: 'douyin', level: 'A', category: '美妆', fansCount: 0, intro: '' })
+const editing = reactive({ id: null, name: '', nickname: '', level: 'A', category: '美妆', fansCount: 0, intro: '' })
 
 const fetchData = async () => {
   loading.value = true
@@ -109,7 +90,7 @@ const fetchData = async () => {
 }
 
 const onSearch = () => { query.page = 1; fetchData() }
-const onRefresh = () => { query.search = ''; query.platform = ''; query.level = ''; query.page = 1; fetchData() }
+const onRefresh = () => { query.search = ''; query.level = ''; query.page = 1; fetchData() }
 
 const handleEdit = (row) => { Object.assign(editing, row); showCreate.value = true }
 const handleSave = async () => {

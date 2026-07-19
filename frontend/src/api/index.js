@@ -48,8 +48,20 @@ export const batchSimulate = (count) => request.post('/datapipeline/batch-simula
 // ===== 数据可视化 =====
 export const getDashboardKpi = () => request.get('/datavis/dashboard/kpi')
 export const getGmvTrend = (months = 12) => request.get('/datavis/dashboard/gmv-trend', { params: { months } })
-export const getPlatformDistribution = () => request.get('/datavis/dashboard/platform-distribution')
+export const getCategoryDistribution = () => request.get('/datavis/dashboard/platform-distribution')
 export const getCategoryRank = () => request.get('/datavis/dashboard/category-rank')
 export const getAnchorRank = (limit = 10) => request.get('/datavis/dashboard/anchor-rank', { params: { limit } })
 export const getGeoDistribution = () => request.get('/datavis/dashboard/geo-distribution')
 export const getRealtimeData = () => request.get('/datavis/dashboard/realtime')
+export const getActivities = () => request.get('/datavis/dashboard/activities')
+
+// ===== 实时直播数据 =====
+export const getRealtimeRooms = () => request.get('/live/rooms')
+export const getRoomDanmaku = (roomId, limit = 100) => request.get(`/live/room/${roomId}/danmaku`, { params: { limit } })
+export const getRoomProducts = (roomId) => request.get(`/live/room/${roomId}/products`)
+export const getHotwords = () => request.get('/datavis/dashboard/hotwords')
+
+// ===== 爬虫管理 =====
+export const getCrawlerStatus = () => request.get('/crawler/status')
+export const startCrawler = (data) => request.post('/crawler/start', data)
+export const stopCrawler = () => request.post('/crawler/stop')

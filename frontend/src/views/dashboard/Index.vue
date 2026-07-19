@@ -22,7 +22,7 @@
 
     <div class="chart-grid">
       <div class="chart-box"><div class="chart-title">┃ GMV趋势（近30天）</div><div ref="c1" style="height:260px"></div></div>
-      <div class="chart-box"><div class="chart-title">┃ 平台分布</div><div ref="c2" style="height:260px"></div></div>
+      <div class="chart-box"><div class="chart-title">┃ 类目订单分布</div><div ref="c2" style="height:260px"></div></div>
       <div class="chart-box"><div class="chart-title">┃ 主播GMV排行 TOP10</div><div ref="c3" style="height:260px"></div></div>
       <div class="chart-box"><div class="chart-title">┃ 类目占比分析</div><div ref="c4" style="height:260px"></div></div>
       <div class="chart-box"><div class="chart-title">┃ 转化率分布</div><div ref="c5" style="height:260px"></div></div>
@@ -48,10 +48,10 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import * as echarts from 'echarts'
-import request from '@/utils/request'
+import { getDashboardKpi, getCategoryDistribution, getAnchorRank, getCategoryRank, getGmvTrend, getActivities } from '@/api'
 
 const kpis = ref([
-  { label: '总GMV', value: '--', change: '0', up: true, sub: '全部平台累计', color: '#00ffcc' },
+  { label: '总GMV', value: '--', change: '0', up: true, sub: '抖音累计', color: '#00ffcc' },
   { label: '直播间', value: '--', change: '0', up: true, sub: '活跃房间数', color: '#00d9ff' },
   { label: '主播数', value: '--', change: '0', up: true, sub: '带货主播', color: '#7c3aed' },
   { label: '观众', value: '--', change: '0', up: true, sub: '累计观众', color: '#ff4757' },
@@ -74,7 +74,7 @@ const c1 = ref(), c2 = ref(), c3 = ref(), c4 = ref(), c5 = ref()
 let charts = []
 
 async function fetchAll() {
-  const kpi = await request.get('/datavis/dashboard/kpi')
+  const kpi = await getDashboardKpi()
   const k = kpi.data
   const gmvYi = k.totalGmv / 1e8
   kpis.value[0].value = '￥' + (gmvYi < 1 ? (k.totalGmv/1e4).toFixed(1)+'万' : gmvYi.toFixed(1)+'亿')
@@ -87,15 +87,13 @@ async function fetchAll() {
   summary.value.anchors = (k.totalAnchors || 0)
   summary.value.orders = (k.totalOrders || 0).toLocaleString()
 
-  for (let i = 0; i < 6; i++) {
-    kpis.value[i].change = (Math.random() * 25 - 5).toFixed(1)
-    kpis.value[i].up = Number(kpis.value[i].change) > 0
-  }
+  // KPI change percentages are not generated from random data
+  // kpis.value[i].change = (Math.random() * 25 - 5).toFixed(1)
 
   const [pf, an, cat] = await Promise.all([
-    request.get('/datavis/dashboard/platform-distribution'),
-    request.get('/datavis/dashboard/anchor-rank', { params: { limit: 50 } }),
-    request.get('/datavis/dashboard/category-rank')
+    getCategoryDistribution(),
+    getAnchorRank(50),
+    getCategoryRank()
   ])
   summary.value.last = new Date().toLocaleTimeString()
 
@@ -108,24 +106,39 @@ async function fetchAll() {
     tooltip: { trigger: 'axis', backgroundColor: 'rgba(15,20,30,0.95)', borderColor: 'rgba(0,255,204,0.3)', textStyle: { color: '#e0e0e0' } }
   }
 
-  // 趋势
-  let s = 42; const r = () => { s = (s * 9301 + 49297) % 233280; return s / 233280 }
-  if (c1.value) charts.push(echarts.init(c1.value).setOption({
-    ...darkTheme,
-    xAxis: { type: 'category', data: Array.from({ length: 30 }, (_, i) => i + 1).map(String), axisLabel: { color: 'rgba(255,255,255,0.3)', interval: 5 }, axisLine: { lineStyle: { color: 'rgba(0,255,204,0.1)' } } },
-    yAxis: { type: 'value', axisLabel: { color: 'rgba(255,255,255,0.3)' }, splitLine: { lineStyle: { color: 'rgba(255,255,255,0.04)' } } },
-    series: [{
-      type: 'line', smooth: true, symbol: 'none',
-      areaStyle: { opacity: 0.15, color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
-        colorStops: [{ offset: 0, color: '#00ffcc' }, { offset: 1, color: 'rgba(0,255,204,0)' }] } },
-      lineStyle: { color: '#00ffcc', width: 2, shadowBlur: 10, shadowColor: '#00ffcc' },
-      data: Array.from({ length: 30 }, () => Math.round(50000 + r() * 80000))
-    }]
-  }))
+  // 趋势 - from API
+  try {
+    const gmvRes = await getGmvTrend()
+    const gmvData = gmvRes.data || []
+    if (c1.value) charts.push(echarts.init(c1.value).setOption({
+      ...darkTheme,
+      xAxis: { type: 'category', data: gmvData.map(d => d.date?.slice(5) || ''), axisLabel: { color: 'rgba(255,255,255,0.3)', interval: 5 }, axisLine: { lineStyle: { color: 'rgba(0,255,204,0.1)' } } },
+      yAxis: { type: 'value', axisLabel: { color: 'rgba(255,255,255,0.3)' }, splitLine: { lineStyle: { color: 'rgba(255,255,255,0.04)' } } },
+      series: [{
+        type: 'line', smooth: true, symbol: 'none',
+        areaStyle: { opacity: 0.15, color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+          colorStops: [{ offset: 0, color: '#00ffcc' }, { offset: 1, color: 'rgba(0,255,204,0)' }] } },
+        lineStyle: { color: '#00ffcc', width: 2, shadowBlur: 10, shadowColor: '#00ffcc' },
+        data: gmvData.map(d => d.value || 0)
+      }]
+    }))
+  } catch (e) {
+    if (c1.value) charts.push(echarts.init(c1.value).setOption({
+      backgroundColor: 'transparent',
+      title: { text: '暂无趋势数据', left: 'center', top: 'middle', textStyle: { color: 'rgba(255,255,255,0.3)' } }
+    }))
+  }
 
-  // 平台饼图
-  const pfData = (pf.data || []).length > 0 ? pf.data : [{ name: '抖音', value: 5 }, { name: '淘宝', value: 3 }, { name: '快手', value: 2 }]
-  if (c2.value) charts.push(echarts.init(c2.value).setOption({
+  // 类目订单分布饼图 - no fallback, show empty when no data
+  const pfData = pf.data || []
+  if (c2.value) {
+    if (pfData.length === 0) {
+      charts.push(echarts.init(c2.value).setOption({
+        backgroundColor: 'transparent',
+        title: { text: '暂无数据', left: 'center', top: 'middle', textStyle: { color: 'rgba(255,255,255,0.3)' } }
+      }))
+    } else {
+      charts.push(echarts.init(c2.value).setOption({
     backgroundColor: 'transparent',
     tooltip: { trigger: 'item', backgroundColor: 'rgba(15,20,30,0.95)', borderColor: 'rgba(0,255,204,0.3)' },
     series: [{
@@ -135,6 +148,8 @@ async function fetchAll() {
       color: ['#00ffcc', '#00d9ff', '#a855f7', '#ffa502', '#ff4757']
     }]
   }))
+    }
+  }
 
   // 主播排行
   const anList = an.data || []
@@ -153,18 +168,27 @@ async function fetchAll() {
     }]
   }))
 
-  // 类目
-  const catData = (cat.data || []).length > 0 ? cat.data : [{ name: '美妆', value: 586 }, { name: '食品', value: 895 }]
-  if (c4.value) charts.push(echarts.init(c4.value).setOption({
-    backgroundColor: 'transparent',
-    tooltip: { trigger: 'item', backgroundColor: 'rgba(15,20,30,0.95)', borderColor: 'rgba(0,255,204,0.3)' },
-    series: [{
-      type: 'pie', radius: ['45%', '70%'], center: ['50%', '55%'],
-      label: { formatter: '{b}\n{d}%', fontSize: 10, color: 'rgba(255,255,255,0.6)' },
-      data: catData,
-      color: ['#00ffcc', '#a855f7', '#00d9ff', '#ff4757', '#ffa502', '#1e90ff', '#ff6b6b', '#2ed573']
-    }]
-  }))
+  // 类目 - no fallback, show empty when no data
+  const catData = cat.data || []
+  if (c4.value) {
+    if (catData.length === 0) {
+      charts.push(echarts.init(c4.value).setOption({
+        backgroundColor: 'transparent',
+        title: { text: '暂无数据', left: 'center', top: 'middle', textStyle: { color: 'rgba(255,255,255,0.3)' } }
+      }))
+    } else {
+      charts.push(echarts.init(c4.value).setOption({
+        backgroundColor: 'transparent',
+        tooltip: { trigger: 'item', backgroundColor: 'rgba(15,20,30,0.95)', borderColor: 'rgba(0,255,204,0.3)' },
+        series: [{
+          type: 'pie', radius: ['45%', '70%'], center: ['50%', '55%'],
+          label: { formatter: '{b}\n{d}%', fontSize: 10, color: 'rgba(255,255,255,0.6)' },
+          data: catData,
+          color: ['#00ffcc', '#a855f7', '#00d9ff', '#ff4757', '#ffa502', '#1e90ff', '#ff6b6b', '#2ed573']
+        }]
+      }))
+    }
+  }
 
   // 转化率
   if (c5.value) {
@@ -236,7 +260,7 @@ async function fetchAll() {
 
 async function fetchActivities() {
   try {
-    const acts = await request.get('/datavis/dashboard/activities')
+    const acts = await getActivities()
     if (acts && acts.data && acts.data.length > 0) activities.value = acts.data
   } catch (e) {}
 }

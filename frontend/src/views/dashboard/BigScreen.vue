@@ -59,13 +59,6 @@
           <el-table :data="liveRooms" stripe size="small" height="450" :row-style="{ background: 'transparent' }">
             <el-table-column prop="roomName" label="直播间" min-width="160" />
             <el-table-column prop="anchorName" label="主播" width="90" />
-            <el-table-column prop="platform" label="平台" width="70" align="center">
-              <template #default="{ row }">
-                <el-tag size="small" :type="row.platform === 'taobao' ? 'warning' : row.platform === 'douyin' ? '' : 'success'" effect="dark">
-                  {{ {taobao:'淘宝', douyin:'抖音', kuaishou:'快手'}[row.platform] }}
-                </el-tag>
-              </template>
-            </el-table-column>
             <el-table-column prop="viewerCount" label="在线" width="90" sortable align="right">
               <template #default="{ row }">{{ formatNumber(row.viewerCount) }}</template>
             </el-table-column>
@@ -83,18 +76,32 @@
         </el-card>
       </el-col>
     </el-row>
+    <el-row :gutter="16" class="mt-16">
+      <el-col :span="24">
+        <el-card class="dark-card">
+          <template #header><span>┃ 弹幕热词</span></template>
+          <div class="hotwords-container" v-if="hotwords.length > 0">
+            <span v-for="(word, idx) in hotwords" :key="idx" class="hotword-tag" :style="{ fontSize: (14 + (word.count || word.heat || 1) * 0.5) + 'px', opacity: 0.6 + Math.min(0.4, (word.count || word.heat || 1) * 0.02) }">
+              {{ word.word || word.text || word }}
+            </span>
+          </div>
+          <div v-else style="text-align:center;color:rgba(255,255,255,0.3);padding:40px 0">暂无热词数据</div>
+        </el-card>
+      </el-col>
+    </el-row>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import * as echarts from 'echarts'
-import { getRealtimeData, getGeoDistribution, getLiveRooms } from '@/api'
+import { getRealtimeData, getGeoDistribution, getLiveRooms, getHotwords } from '@/api'
 
 const realtime = reactive({})
 const liveRooms = ref([])
 const currentTime = ref('')
 const geoRef = ref()
+const hotwords = ref([])
 let chart, timer
 
 const formatNumber = (n) => {
@@ -108,9 +115,10 @@ const updateTime = () => { currentTime.value = new Date().toLocaleTimeString() }
 
 const fetchData = async () => {
   try {
-    const [r, rooms] = await Promise.all([getRealtimeData(), getLiveRooms()])
+    const [r, rooms, hw] = await Promise.all([getRealtimeData(), getLiveRooms(), getHotwords().catch(() => ({ data: [] }))])
     Object.assign(realtime, r.data)
     liveRooms.value = rooms.data || []
+    hotwords.value = hw.data || []
   } catch (e) { console.error(e) }
 }
 
@@ -179,4 +187,7 @@ onBeforeUnmount(() => {
   &.orange { background: linear-gradient(135deg, #faad14 0%, #d48806 100%) !important; }
   &.purple { background: linear-gradient(135deg, #722ed1 0%, #531dab 100%) !important; }
 }
+.hotwords-container { display: flex; flex-wrap: wrap; gap: 12px; padding: 10px 0; justify-content: center; }
+.hotword-tag { display: inline-block; padding: 4px 14px; background: rgba(24,144,255,0.15); border: 1px solid rgba(24,144,255,0.3); border-radius: 20px; color: #69c0ff; transition: all 0.3s; cursor: default; }
+.hotword-tag:hover { background: rgba(24,144,255,0.3); color: #fff; transform: scale(1.05); }
 </style>

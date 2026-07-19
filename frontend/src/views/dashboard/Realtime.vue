@@ -24,14 +24,14 @@
         </div>
       </div>
 
-      <div class="room-grid">
-        <div class="room-card" v-for="r in sortedRooms" :key="r.id" :style="{ borderLeft: `3px solid ${getColor(r.platform)}` }">
+      <div class="room-grid" v-if="sortedRooms.length > 0">
+        <div class="room-card" v-for="r in sortedRooms" :key="r.roomId || r.id" @click="goRoomDetail(r)" style="cursor:pointer" :style="{ borderLeft: '3px solid #00d9ff' }">
           <div class="room-top">
             <span class="room-tag live-tag">LIVE</span>
-            <span class="platform-tag">{{ {douyin:'抖音',taobao:'淘宝',kuaishou:'快手'}[r.platform] }}</span>
           </div>
           <h4 class="room-name">{{ r.roomName }}</h4>
           <p class="room-anchor">{{ r.anchorName }}</p>
+          <div v-if="r.liveUrl" class="room-link" @click.stop="openLiveUrl(r.liveUrl)" style="font-size:10px;color:#00ffcc;cursor:pointer;margin:2px 0">🔗 跳转直播间</div>
           <div class="room-stats">
             <div><span>观众</span><strong>{{ formatNum(r.viewerCount) }}</strong></div>
             <div><span>订单</span><strong>{{ formatNum(r.orderCount) }}</strong></div>
@@ -39,13 +39,22 @@
           </div>
         </div>
       </div>
+      <div v-else class="empty-state">
+        <p>暂无直播中的带货直播间</p>
+        <p class="empty-hint">请在带货高峰时段 (19:00-23:00) 运行爬虫刷新数据</p>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import request from '@/utils/request'
+import { useRouter } from 'vue-router'
+import { getRealtimeRooms, getRoomPage } from '@/api'
+
+const router = useRouter()
+const goRoomDetail = (r) => { router.push(`/live-room/${r.roomId || r.id}`) }
+const openLiveUrl = (url) => { window.open(url, '_blank') }
 
 const liveRooms = ref([])
 const sortBy = ref('viewer_count')
@@ -65,32 +74,45 @@ const formatNum = (n) => {
   return v.toLocaleString()
 }
 
-const getColor = (p) => p === 'douyin' ? '#00d9ff' : p === 'taobao' ? '#ffa502' : '#ff4757'
+const getColor = () => '#00d9ff'
 
 let timer
 
 async function fetchData() {
   try {
-    const res = await request.get('/livecommerce/room/page', { params: { page: 1, pageSize: 200 } })
-    const rooms = res.data.records || []
-    const live = rooms.filter(r => r.status === 'live')
-    // 模拟实时波动：每个房间的观众/GMV/订单数实时变动
-    liveRooms.value = live.map(r => {
-      const baseViewers = Number(r.viewerCount || 0)
-      const baseGmv = Number(r.gmv || 0)
-      const baseOrders = Number(r.orderCount || 0)
-      return {
-        ...r,
-        viewerCount: Math.max(0, baseViewers + Math.floor((Math.random() - 0.5) * baseViewers * 0.02)),
-        gmv: Math.max(0, baseGmv + Math.floor((Math.random() - 0.5) * baseGmv * 0.015)),
-        orderCount: Math.max(0, baseOrders + Math.floor((Math.random() - 0.5) * Math.max(1, baseOrders) * 0.1))
+    // 先尝试从 rt_room_stats 获取真实爬虫数据
+    let rooms = []
+    try {
+      const rtRes = await getRealtimeRooms()
+      if (rtRes?.code === 0 && rtRes?.data?.length > 0) {
+        rooms = rtRes.data.map(r => ({
+          id: r.roomId,
+          roomName: r.roomName,
+          anchorName: r.anchorName,
+          category: r.category,
+          status: r.status,
+          viewerCount: r.viewerCount,
+          orderCount: r.totalOrders,
+          gmv: r.totalGmv,
+          liveUrl: r.liveUrl,
+          roomId: r.roomId
+        }))
       }
-    })
-    const viewers = liveRooms.value.reduce((s, r) => s + Number(r.viewerCount || 0), 0)
-    const gmv = liveRooms.value.reduce((s, r) => s + Number(r.gmv || 0), 0)
-    const orders = liveRooms.value.reduce((s, r) => s + Number(r.orderCount || 0), 0)
+    } catch {}
 
-    kpis.value[0].value = liveRooms.value.length
+    // Fallback: 从 live_room 表获取
+    if (rooms.length === 0) {
+      const res = await getRoomPage({ page: 1, pageSize: 200 })
+      const allRooms = res?.data?.records || []
+      rooms = allRooms.filter(r => r.status === 'live' && r.liveUrl).map(r => ({ ...r }))
+    }
+
+    liveRooms.value = rooms
+    const viewers = rooms.reduce((s, r) => s + Number(r.viewerCount || 0), 0)
+    const gmv = rooms.reduce((s, r) => s + Number(r.gmv || 0), 0)
+    const orders = rooms.reduce((s, r) => s + Number(r.orderCount || 0), 0)
+
+    kpis.value[0].value = rooms.length
     kpis.value[1].value = formatNum(viewers)
     kpis.value[2].value = '￥' + formatNum(gmv)
     kpis.value[3].value = formatNum(orders)
@@ -130,11 +152,13 @@ onBeforeUnmount(() => clearInterval(timer))
 .room-tag { font-size: 9px; padding: 1px 6px; border-radius: 3px; font-weight: 700; }
 .live-tag { background: #ff4757; color: #fff; animation: blink 1.5s infinite; }
 @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
-.platform-tag { font-size: 10px; color: rgba(255,255,255,0.3); }
 .room-name { font-size: 13px; color: #e0e0e0; margin: 4px 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .room-anchor { font-size: 11px; color: rgba(255,255,255,0.35); margin-bottom: 8px; }
 .room-stats { display: flex; gap: 12px; }
 .room-stats div { display: flex; flex-direction: column; }
 .room-stats span { font-size: 9px; color: rgba(255,255,255,0.25); }
 .room-stats strong { font-size: 13px; color: rgba(255,255,255,0.7); font-family: 'Courier New', monospace; }
+.empty-state { text-align: center; padding: 40px 20px; }
+.empty-state p { color: rgba(255,255,255,0.4); font-size: 14px; margin: 4px 0; }
+.empty-state .empty-hint { font-size: 11px; color: rgba(255,255,255,0.2); }
 </style>

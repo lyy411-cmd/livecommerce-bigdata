@@ -1,0 +1,330 @@
+======================================================================
+  StarCast StarCast Live Commerce Big Data Platform - Cluster Edition
+======================================================================
+
+  VM IP: 192.168.104.100
+  Connected services:
+     [OK] MySQL    192.168.104.100:3306
+     [OK] Kafka    192.168.104.100:9092
+     [OK] Hive     192.168.104.100:10000
+     [OK] HDFS Web 192.168.104.100:9870
+     [OK] Flink    192.168.104.100:8081
+
+
+  [MySQL] Database livecommerce_db initialized OK
+  [OK] Data source ready
+  [Backend] http://localhost:8080
+  [OK] Kafka Producer connected
+  [OK] Kafka topics already exist
+  [OK] Kafka Consumer started (Kafka -> MySQL)
+  [OK] WebSocket server started on ws://localhost:8765
+  [RoomRefresh] 已禁用 - 由 auto_danmaku_collector 统一管理房间发现  [Frontend] http://localhost:5173
+
+
+======================================================================
+  System Started!
+======================================================================
+  Web UI:    http://localhost:5173
+  Login:     admin / 123456
+  Flink Web: http://192.168.104.100:8081
+  HDFS Web:  http://192.168.104.100:9870
+
+
+  [Danmaku] Starting auto danmaku collector...
+已加载抖音 Protobuf 解码器
+playwright-stealth 未安装，将使用内置反检测脚本
+  [Danmaku] Found saved login cookies (79 cookies)
+正在启动 Playwright 浏览器...
+已加载 79 条 Cookie
+已恢复保存的 Cookie
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+已访问抖音主站建立会话
+浏览器初始化完成
+  [Danmaku] Login verified from saved cookies
+  [Danmaku] Running scrape_rooms.py to discover rooms with web_rid...
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+  [Danmaku] scrape_rooms.py completed: {'ok': True, 'rooms': 10}
+  [Danmaku] Loaded 10 live rooms from MySQL (with web_rid)
+  [Danmaku] Applied estimation model to 5 rooms
+  [Danmaku] Wrote 5 real rooms to MySQL
+  [Danmaku] MySQL flush thread started (every 8s)
+  [Danmaku] Started 5 concurrent room monitors
+  [Danmaku] Monitoring room 1/5: 枣阳市妮诺百货店（个体工商户） (id=226153993959)
+启动房间监控: 226153993959
+房间 226153993959 监控启动（直连弹幕模式）
+  [Danmaku] Monitoring room 2/5: 小谢 (id=355173566818)
+启动房间监控: 355173566818
+房间 355173566818 监控启动（直连弹幕模式）
+  [Danmaku] Monitoring room 4/5: 宣威市宝山丰味火腿 (id=921561764139)
+启动房间监控: 921561764139
+房间 921561764139 监控启动（直连弹幕模式）
+  [Danmaku] Monitoring room 5/5: 壳壳优 (id=158392653553)
+启动房间监控: 158392653553
+房间 158392653553 监控启动（直连弹幕模式）
+[房间 921561764139] 启动独立浏览器失败: BrowserType.launch_persistent_context: Target page, context or browser has been closed
+Browser logs:
+
+<launching> C:\Program Files\Google\Chrome\Application\chrome.exe --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --no-sandbox --disable-blink-features=AutomationControlled --no-sandbox --user-data-dir=C:\Users\MECHREVO\.qoderworkcn\douyin_browser_profile --remote-debugging-pipe about:blank
+<launched> pid=32812
+[pid=32812][out] \ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffdе\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\u1ef0\ufffdд\U000bfaa1\ufffd
+Call log:
+  - <launching> C:\Program Files\Google\Chrome\Application\chrome.exe --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --no-sandbox --disable-blink-features=AutomationControlled --no-sandbox --user-data-dir=C:\Users\MECHREVO\.qoderworkcn\douyin_browser_profile --remote-debugging-pipe about:blank
+  - <launched> pid=32812
+  - [pid=32812][out] \ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffdе\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\u1ef0\ufffdд\U000bfaa1\ufffd
+  - [pid=32812] <gracefully close start>
+  - [pid=32812] <kill>
+  - [pid=32812] <will force kill>
+  - [pid=32812] taskkill stderr: \ufffd\ufffd\ufffd\ufffd: \xfb\ufffd\ufffd\ufffd\u04b5\ufffd\ufffd\ufffd\ufffd\ufffd "32812"\ufffd\ufffd
+  - [pid=32812] <process did exit: exitCode=0, signal=null>
+  - [pid=32812] starting temporary directories cleanup
+  - [pid=32812] finished temporary directories cleanup
+  - [pid=32812] <gracefully close end>
+
+[房间 158392653553] 启动独立浏览器失败: BrowserType.launch_persistent_context: Target page, context or browser has been closed
+Browser logs:
+
+<launching> C:\Program Files\Google\Chrome\Application\chrome.exe --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --no-sandbox --disable-blink-features=AutomationControlled --no-sandbox --user-data-dir=C:\Users\MECHREVO\.qoderworkcn\douyin_browser_profile --remote-debugging-pipe about:blank
+<launched> pid=36168
+[pid=36168][out] \ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffdе\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\u1ef0\ufffdд\U000bfaa1\ufffd
+[pid=36168] <process did exit: exitCode=0, signal=null>
+[pid=36168] starting temporary directories cleanup
+Call log:
+  - <launching> C:\Program Files\Google\Chrome\Application\chrome.exe --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --no-sandbox --disable-blink-features=AutomationControlled --no-sandbox --user-data-dir=C:\Users\MECHREVO\.qoderworkcn\douyin_browser_profile --remote-debugging-pipe about:blank
+  - <launched> pid=36168
+  - [pid=36168][out] \ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffdе\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\u1ef0\ufffdд\U000bfaa1\ufffd
+  - [pid=36168] <process did exit: exitCode=0, signal=null>
+  - [pid=36168] starting temporary directories cleanup
+  - [pid=36168] <gracefully close start>
+  - [pid=36168] <kill>
+  - [pid=36168] <skipped force kill spawnedProcess.killed=false processClosed=true>
+  - [pid=36168] finished temporary directories cleanup
+  - [pid=36168] <gracefully close end>
+
+[房间 355173566818] 启动独立浏览器失败: BrowserType.launch_persistent_context: Target page, context or browser has been closed
+Browser logs:
+
+<launching> C:\Program Files\Google\Chrome\Application\chrome.exe --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --no-sandbox --disable-blink-features=AutomationControlled --no-sandbox --user-data-dir=C:\Users\MECHREVO\.qoderworkcn\douyin_browser_profile --remote-debugging-pipe about:blank
+<launched> pid=15380
+[pid=15380][out] \ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffdе\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\u1ef0\ufffdд\U000bfaa1\ufffd
+Call log:
+  - <launching> C:\Program Files\Google\Chrome\Application\chrome.exe --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --no-sandbox --disable-blink-features=AutomationControlled --no-sandbox --user-data-dir=C:\Users\MECHREVO\.qoderworkcn\douyin_browser_profile --remote-debugging-pipe about:blank
+  - <launched> pid=15380
+  - [pid=15380][out] \ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffdе\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\u1ef0\ufffdд\U000bfaa1\ufffd
+  - [pid=15380] <gracefully close start>
+  - [pid=15380] <kill>
+  - [pid=15380] <will force kill>
+  - [pid=15380] taskkill stderr: \ufffd\ufffd\ufffd\ufffd: \xfb\ufffd\ufffd\ufffd\u04b5\ufffd\ufffd\ufffd\ufffd\ufffd "15380"\ufffd\ufffd
+  - [pid=15380] <process did exit: exitCode=0, signal=null>
+  - [pid=15380] starting temporary directories cleanup
+  - [pid=15380] finished temporary directories cleanup
+  - [pid=15380] <gracefully close end>
+
+[房间 226153993959] 启动独立浏览器失败: BrowserType.launch_persistent_context: Target page, context or browser has been closed
+Browser logs:
+
+<launching> C:\Program Files\Google\Chrome\Application\chrome.exe --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --no-sandbox --disable-blink-features=AutomationControlled --no-sandbox --user-data-dir=C:\Users\MECHREVO\.qoderworkcn\douyin_browser_profile --remote-debugging-pipe about:blank
+<launched> pid=13700
+[pid=13700][out] \ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffdе\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\u1ef0\ufffdд\U000bfaa1\ufffd
+Call log:
+  - <launching> C:\Program Files\Google\Chrome\Application\chrome.exe --disable-field-trial-config --disable-background-networking --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-back-forward-cache --disable-breakpad --disable-client-side-phishing-detection --disable-component-extensions-with-background-pages --disable-component-update --no-default-browser-check --disable-default-apps --disable-dev-shm-usage --disable-edgeupdater --disable-extensions --disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion --enable-features=CDPScreenshotNewSurface --allow-pre-commit-input --disable-hang-monitor --disable-ipc-flooding-protection --disable-popup-blocking --disable-prompt-on-repost --disable-renderer-backgrounding --force-color-profile=srgb --metrics-recording-only --no-first-run --password-store=basic --use-mock-keychain --no-service-autorun --export-tagged-pdf --disable-search-engine-choice-screen --unsafely-disable-devtools-self-xss-warnings --edge-skip-compat-layer-relaunch --disable-infobars --disable-search-engine-choice-screen --disable-sync --enable-unsafe-swiftshader --no-sandbox --disable-blink-features=AutomationControlled --no-sandbox --user-data-dir=C:\Users\MECHREVO\.qoderworkcn\douyin_browser_profile --remote-debugging-pipe about:blank
+  - <launched> pid=13700
+  - [pid=13700][out] \ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffdе\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\ufffd\u1ef0\ufffdд\U000bfaa1\ufffd
+  - [pid=13700] <gracefully close start>
+  - [pid=13700] <kill>
+  - [pid=13700] <will force kill>
+  - [pid=13700] taskkill stderr: \ufffd\ufffd\ufffd\ufffd: \xfb\ufffd\ufffd\ufffd\u04b5\ufffd\ufffd\ufffd\ufffd\ufffd "13700"\ufffd\ufffd
+  - [pid=13700] <process did exit: exitCode=0, signal=null>
+  - [pid=13700] starting temporary directories cleanup
+  - [pid=13700] finished temporary directories cleanup
+  - [pid=13700] <gracefully close end>
+
+[房间 921561764139] CDP 网络层监听已启用
+[房间 921561764139] 正在导航到直播间（独立页面）...
+[房间 158392653553] CDP 网络层监听已启用
+[房间 158392653553] 正在导航到直播间（独立页面）...
+[房间 355173566818] CDP 网络层监听已启用
+[房间 355173566818] 正在导航到直播间（独立页面）...
+[房间 226153993959] CDP 网络层监听已启用
+[房间 226153993959] 正在导航到直播间（独立页面）...
+[房间 158392653553] 页面导航成功（domcontentloaded）
+[房间 355173566818] 页面导航成功（domcontentloaded）
+[房间 226153993959] 页面导航成功（domcontentloaded）
+[房间 921561764139] 页面导航成功（domcontentloaded）
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+[房间 226153993959] [CDP] 检测到原生 WebSocket: id=16028.196 url=wss://webcast100-ws-web-lq.douyin.com/webcast/im/push/v2/?app_name=douyin_web&version_code...
+[房间 226153993959] 首帧解码成功！含 1 条消息
+  [PUSHER] #1 room=226153993959 all=0 room_cl=0 type=enter user=国泰民安
+  [WS-ASYNC] push #1 room=226153993959 targets=0 (all=0 room_cl=0)
+  [PUSHER] #1 future OK
+[房间 158392653553] 等待页面原生 WebSocket 建立（最多 90 秒）...
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=2 broker_version=(0, 10, 0) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+[房间 921561764139] 等待页面原生 WebSocket 建立（最多 90 秒）...
+[房间 355173566818] 等待页面原生 WebSocket 建立（最多 90 秒）...
+[房间 921561764139] [CDP] 检测到原生 WebSocket: id=30364.455 url=wss://webcast100-ws-web-lq.douyin.com/webcast/im/push/v2/?app_name=douyin_web&version_code...
+  [PUSHER] #2 room=226153993959 all=0 room_cl=0 type=enter user=未完待续@
+  [WS-ASYNC] push #2 room=226153993959 targets=0 (all=0 room_cl=0)
+  [PUSHER] #2 future OK
+  [PUSHER] #3 room=226153993959 all=0 room_cl=0 type=enter user=用户50103595
+  [WS-ASYNC] push #3 room=226153993959 targets=0 (all=0 room_cl=0)
+  [PUSHER] #3 future OK
+  [DM-STATS] total=3 types={'enter': 3} push_ok=3 push_skip=0 ws_clients=0
+[房间 226153993959] 等待页面原生 WebSocket 建立（最多 90 秒）...
+  [PUSHER] #4 room=226153993959 all=0 room_cl=0 type=enter user=玉城
+  [WS-ASYNC] push #4 room=226153993959 targets=0 (all=0 room_cl=0)
+  [PUSHER] #4 future OK
+  [PUSHER] #5 room=226153993959 all=0 room_cl=0 type=enter user=自由行者
+  [WS-ASYNC] push #5 room=226153993959 targets=0 (all=0 room_cl=0)
+  [PUSHER] #5 future OK
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=2 broker_version=(0, 10, 0) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+  [PUSHER] ERR #6: 'gbk' codec can't encode character '\u1d36' in position 66: illegal multibyte sequence
+  [PUSHER] #7 room=226153993959 all=0 room_cl=0 type=enter user=为她开一束明媚的阳光
+[房间 921561764139] 首帧解码成功！含 1 条消息
+  [PUSHER] #8 room=921561764139 all=0 room_cl=0 type=enter user=万事通
+  [PUSHER] #9 room=921561764139 all=0 room_cl=0 type=enter user=开心快乐每一天
+  [PUSHER] #10 room=921561764139 all=0 room_cl=0 type=enter user=用户73509803
+[房间 921561764139] 原生 WebSocket 已建立！（0s 时检测到 1 个连接）
+[房间 921561764139] 进入弹幕采集主循环，时长 3600s
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=2 broker_version=(0, 10, 0) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+[房间 226153993959] 原生 WebSocket 已建立！（0s 时检测到 1 个连接）
+[房间 226153993959] 进入弹幕采集主循环，时长 3600s
+[房间 226153993959] [CDP] WebSocket 关闭: 16028.196
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=2 broker_version=(0, 10, 0) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=2 broker_version=(0, 10, 0) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+[房间 158392653553] 等待原生 WS... 15s
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=2 broker_version=(0, 10, 0) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+[房间 355173566818] 等待原生 WS... 15s
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=2 broker_version=(0, 10, 0) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+  [DM-STATS] total=19 types={'enter': 19} push_ok=19 push_skip=0 ws_clients=0
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=2 broker_version=(0, 10, 0) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+[房间 158392653553] 等待原生 WS... 30s
+[房间 355173566818] 等待原生 WS... 30s
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+[房间 921561764139] 状态: WS=1 帧=38 消息=44 fetch=False
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=2 broker_version=(0, 10, 0) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+[房间 921561764139] [CDP] WebSocket 关闭: 30364.455
+[房间 226153993959] 状态: WS=0 帧=13 消息=13 fetch=False
+  [DM-STATS] total=28 types={'enter': 28} push_ok=28 push_skip=0 ws_clients=0
+[房间 355173566818] [CDP] 检测到原生 WebSocket: id=8308.481 url=wss://webcast100-ws-web-hl.douyin.com/webcast/im/push/v2/?app_name=douyin_web&version_code...
+[房间 158392653553] [CDP] 检测到原生 WebSocket: id=31184.523 url=wss://webcast100-ws-web-lf.douyin.com/webcast/im/push/v2/?app_name=douyin_web&version_code...
+[房间 158392653553] 原生 WebSocket 已建立！（40s 时检测到 1 个连接）
+[房间 355173566818] 原生 WebSocket 已建立！（40s 时检测到 1 个连接）
+[房间 355173566818] 进入弹幕采集主循环，时长 3600s
+[房间 355173566818] 首帧解码成功！含 1 条消息
+[房间 158392653553] 进入弹幕采集主循环，时长 3600s
+[房间 158392653553] 首帧解码成功！含 1 条消息
+[房间 355173566818] [CDP] WebSocket 关闭: 8308.481
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=2 broker_version=(0, 10, 0) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+  [DM-STATS] total=31 types={'enter': 31} push_ok=31 push_skip=0 ws_clients=0
+[房间 921561764139] 状态: WS=0 帧=41 消息=46 fetch=False
+[房间 226153993959] 状态: WS=0 帧=13 消息=13 fetch=False
+[房间 355173566818] 状态: WS=0 帧=12 消息=15 fetch=False
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=2 broker_version=(0, 10, 0) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+[房间 158392653553] 状态: WS=1 帧=15 消息=12 fetch=False
+  [DM-STATS] total=33 types={'enter': 33} push_ok=33 push_skip=0 ws_clients=0
+[房间 158392653553] [CDP] WebSocket 关闭: 31184.523
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+[房间 921561764139] 状态: WS=0 帧=41 消息=46 fetch=False
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+[房间 226153993959] 状态: WS=0 帧=13 消息=13 fetch=False
+  [DM-STATS] total=34 types={'enter': 34} push_ok=34 push_skip=0 ws_clients=0
+[房间 355173566818] 状态: WS=0 帧=12 消息=15 fetch=False
+[房间 158392653553] 状态: WS=0 帧=21 消息=16 fetch=False
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=2 broker_version=(0, 10, 0) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+发送失败 -> topic=danmaku_events key=226153993959 error=KafkaTimeoutError: Expiring 11 record(s) for TopicPartition(topic='danmaku_events', partition=1): 120008 ms has passed since batch creation
+发送失败 -> topic=danmaku_events key=226153993959 error=KafkaTimeoutError: Expiring 11 record(s) for TopicPartition(topic='danmaku_events', partition=1): 120008 ms has passed since batch creation
+发送失败 -> topic=danmaku_events key=226153993959 error=KafkaTimeoutError: Expiring 11 record(s) for TopicPartition(topic='danmaku_events', partition=1): 120008 ms has passed since batch creation
+发送失败 -> topic=danmaku_events key=226153993959 error=KafkaTimeoutError: Expiring 11 record(s) for TopicPartition(topic='danmaku_events', partition=1): 120008 ms has passed since batch creation
+发送失败 -> topic=danmaku_events key=226153993959 error=KafkaTimeoutError: Expiring 11 record(s) for TopicPartition(topic='danmaku_events', partition=1): 120008 ms has passed since batch creation
+发送失败 -> topic=danmaku_events key=226153993959 error=KafkaTimeoutError: Expiring 11 record(s) for TopicPartition(topic='danmaku_events', partition=1): 120008 ms has passed since batch creation
+发送失败 -> topic=danmaku_events key=226153993959 error=KafkaTimeoutError: Expiring 11 record(s) for TopicPartition(topic='danmaku_events', partition=1): 120008 ms has passed since batch creation
+发送失败 -> topic=danmaku_events key=226153993959 error=KafkaTimeoutError: Expiring 11 record(s) for TopicPartition(topic='danmaku_events', partition=1): 120008 ms has passed since batch creation
+发送失败 -> topic=danmaku_events key=226153993959 error=KafkaTimeoutError: Expiring 11 record(s) for TopicPartition(topic='danmaku_events', partition=1): 120008 ms has passed since batch creation
+发送失败 -> topic=danmaku_events key=355173566818 error=KafkaTimeoutError: Expiring 11 record(s) for TopicPartition(topic='danmaku_events', partition=1): 120008 ms has passed since batch creation
+发送失败 -> topic=danmaku_events key=355173566818 error=KafkaTimeoutError: Expiring 11 record(s) for TopicPartition(topic='danmaku_events', partition=1): 120008 ms has passed since batch creation
+<Sender client_id=kafka-python-producer-1 transactional_id=None>: Uncaught error in kafka producer I/O thread
+Traceback (most recent call last):
+  File "C:\Users\MECHREVO\anaconda3\Lib\site-packages\kafka\producer\sender.py", line 113, in run
+    self.run_once()
+    ~~~~~~~~~~~~~^^
+  File "C:\Users\MECHREVO\anaconda3\Lib\site-packages\kafka\producer\sender.py", line 187, in run_once
+    poll_timeout_ms = self._send_producer_data()
+  File "C:\Users\MECHREVO\anaconda3\Lib\site-packages\kafka\producer\sender.py", line 247, in _send_producer_data
+    self._complete_batch_with_exception(expired_batch, Errors.KafkaTimeoutError(error_message))
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\MECHREVO\anaconda3\Lib\site-packages\kafka\producer\sender.py", line 488, in _complete_batch_with_exception
+    self._dispatch_error(batch, exception, partition_response=None)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\MECHREVO\anaconda3\Lib\site-packages\kafka\producer\sender.py", line 588, in _dispatch_error
+    self._accumulator.muted.remove(batch.topic_partition)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+KeyError: TopicPartition(topic='danmaku_events', partition=1)
+  [DM-STATS] total=34 types={'enter': 34} push_ok=34 push_skip=0 ws_clients=0
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+[房间 921561764139] 状态: WS=0 帧=41 消息=46 fetch=False
+[房间 226153993959] 状态: WS=0 帧=13 消息=13 fetch=False
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+[房间 355173566818] 状态: WS=0 帧=12 消息=15 fetch=False
+[房间 158392653553] 状态: WS=0 帧=21 消息=16 fetch=False
+  [DM-STATS] total=34 types={'enter': 34} push_ok=34 push_skip=0 ws_clients=0
+Connection failed: KafkaConnectionError: DNS Resolution failure
+<KafkaConnection node_id=coordinator-2 broker_version=(3, 9) (disconnected)>: Connection lost: KafkaConnectionError: DNS Resolution failure
+[房间 921561764139] 状态: WS=0 帧=41 消息=46 fetch=False
+[房间 226153993959] 状态: WS=0 帧=13 消息=13 fetch=False

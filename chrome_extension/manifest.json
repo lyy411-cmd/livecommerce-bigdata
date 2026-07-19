@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "星播弹幕捕获器",
+  "version": "1.1.0",
+  "description": "从抖音直播间捕获实时弹幕，推送到星播大数据分析平台",
+  "permissions": ["storage", "activeTab", "scripting", "main"],
+  "host_permissions": [
+    "https://live.douyin.com/*",
+    "http://localhost:8080/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["inject.js"],
+      "matches": ["https://live.douyin.com/*"]
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "星播弹幕捕获器"
+  }
+}
