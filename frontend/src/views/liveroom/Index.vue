@@ -5,6 +5,12 @@
         <el-input v-model="query.search" placeholder="搜索直播间/主播名" clearable style="width:220px" @keyup.enter="onSearch" />
         <el-button type="primary" @click="onSearch">搜索</el-button>
         <el-button @click="onRefresh" class="refresh-btn">刷新</el-button>
+        <el-button @click="onRotate" :loading="rotating" class="rotate-btn" type="warning" plain size="small">
+          模拟直播轮换
+        </el-button>
+        <el-button @click="onRefreshLive" :loading="refreshing" type="success" plain size="small">
+          从抖音刷新直播间
+        </el-button>
         <div class="status-summary">
           <el-tag type="success" effect="dark" size="large">
             <span class="live-dot-sm"></span>
@@ -91,11 +97,6 @@
             <el-table-column label="状态" width="90">
               <template #default><el-tag type="danger" size="small">已结束</el-tag></template>
             </el-table-column>
-            <el-table-column label="操作" width="120" fixed="right">
-              <template #default="{ row }">
-                <el-button text type="info" size="small" @click="viewDanmaku(row)">查看回放</el-button>
-              </template>
-            </el-table-column>
           </el-table>
           <el-empty v-else description="暂无已结束的直播间" :image-size="80" />
         </el-tab-pane>
@@ -107,7 +108,8 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
-import { getRoomPage, getLiveRooms } from '@/api'
+import { ElMessage } from 'element-plus'
+import { getRoomPage, getLiveRooms, rotateDemoRooms, refreshLiveRooms } from '@/api'
 
 const router = useRouter()
 
@@ -161,6 +163,34 @@ const fetchData = async () => {
 const onSearch = () => fetchData()
 const onRefresh = () => { query.search = ''; fetchData() }
 const onTabChange = () => {}
+
+const rotating = ref(false)
+const onRotate = async () => {
+  rotating.value = true
+  try {
+    const res = await rotateDemoRooms()
+    ElMessage.success(res.msg || '轮换完成')
+    await fetchData()
+  } catch (e) {
+    ElMessage.error('轮换失败')
+  } finally {
+    rotating.value = false
+  }
+}
+
+const refreshing = ref(false)
+const onRefreshLive = async () => {
+  refreshing.value = true
+  try {
+    const res = await refreshLiveRooms()
+    ElMessage.success(res?.msg || '刷新完成，已从抖音获取最新直播房间')
+    await fetchData()
+  } catch (e) {
+    ElMessage.error('刷新失败，请稍后重试')
+  } finally {
+    refreshing.value = false
+  }
+}
 
 const viewDanmaku = (row) => {
   const rid = row.roomNo || row.roomIdExternal || String(row.id)

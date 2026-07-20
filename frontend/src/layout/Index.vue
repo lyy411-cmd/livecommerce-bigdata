@@ -18,6 +18,10 @@
           <span class="nav-icon icon-c3">◉</span>
           <span v-if="!collapsed">主播管理</span>
         </router-link>
+        <router-link to="/anchor-search" class="nav-item">
+          <span class="nav-icon" style="color:#a78bfa">⊙</span>
+          <span v-if="!collapsed">主播搜索</span>
+        </router-link>
         <router-link to="/order" class="nav-item">
           <span class="nav-icon icon-c4">▣</span>
           <span v-if="!collapsed">订单管理</span>

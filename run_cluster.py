@@ -64,8 +64,34 @@ _kafka_consumer = None
 _ws_server = None
 _ws_pusher = None
 _crawler_sessions = {}  # platform -> crawler instance
+_anchor_crawl_pid = None  # anchor crawl subprocess PID
 
 FRONTEND_PORT = 5173
+
+
+def _mysql_connect_retry(database=None, max_retries=3, connect_timeout=15):
+    """Connect to MySQL with retries and longer timeout to handle VM intermittent connectivity."""
+    import pymysql as _pm
+    host = VMS['mysql'].split(':')[0]
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            if database:
+                conn = _pm.connect(host=host, port=3306, user=USER, password=PWD,
+                                   database=database, charset='utf8mb4',
+                                   connect_timeout=connect_timeout,
+                                   read_timeout=30, write_timeout=30)
+            else:
+                conn = _pm.connect(host=host, port=3306, user=USER, password=PWD,
+                                   charset='utf8mb4', connect_timeout=connect_timeout)
+            return conn
+        except Exception as e:
+            last_err = e
+            if attempt < max_retries - 1:
+                _wait = (attempt + 1) * 5
+                print(f"  [MySQL] Connect attempt {attempt+1} failed: {e}, retrying in {_wait}s...")
+                time.sleep(_wait)
+    raise last_err
 
 
 def check_mysql_available():
@@ -785,6 +811,52 @@ class APIHandler(BaseHTTPRequestHandler):
             } for r in rows] if rows else []
             self._send({'code': 0, 'data': {'records': data, 'total': len(data), 'page': 1, 'pageSize': 10}})
 
+        elif p.startswith('/api/livecommerce/anchor/search'):
+            """搜索带货主播：从live_room表中按主播名搜索，返回唯一主播及其直播间信息"""
+            from urllib.parse import urlparse, parse_qs
+            qs = parse_qs(urlparse(self.path).query)
+            keyword = (qs.get('keyword', [''])[0] or '').strip()
+            category_f = (qs.get('category', [''])[0] or '').strip()
+            if not keyword and not category_f:
+                self._send({'code': 0, 'data': []})
+                return
+            where = "WHERE deleted=0 AND anchor_name IS NOT NULL AND anchor_name != ''"
+            params = []
+            if keyword:
+                where += " AND (anchor_name LIKE %s OR room_name LIKE %s)"
+                like = f"%{keyword}%"
+                params.extend([like, like])
+            if category_f:
+                where += " AND category = %s"
+                params.append(category_f)
+            rows = query_mysql(
+                f"SELECT anchor_name, category, "
+                f"  COUNT(*) as room_count, "
+                f"  MAX(viewer_count) as max_viewers, "
+                f"  SUM(gmv) as total_gmv, "
+                f"  SUM(order_count) as total_orders, "
+                f"  MAX(CASE WHEN status='live' THEN 1 ELSE 0 END) as is_live, "
+                f"  MAX(CASE WHEN status='live' THEN room_id_external ELSE NULL END) as live_room_id, "
+                f"  MAX(CASE WHEN status='live' THEN live_url ELSE NULL END) as live_url, "
+                f"  MAX(CASE WHEN status='live' THEN room_no ELSE NULL END) as live_room_no "
+                f"FROM live_room {where} "
+                f"GROUP BY anchor_name, category "
+                f"ORDER BY is_live DESC, max_viewers DESC "
+                f"LIMIT 50", params)
+            data = [{
+                'anchorName': r['anchor_name'],
+                'category': r.get('category', ''),
+                'roomCount': int(r.get('room_count', 0)),
+                'maxViewers': int(r.get('max_viewers') or 0),
+                'totalGmv': float(r.get('total_gmv') or 0),
+                'totalOrders': int(r.get('total_orders') or 0),
+                'isLive': bool(r.get('is_live', 0)),
+                'liveRoomId': r.get('live_room_id', '') or '',
+                'liveUrl': r.get('live_url', '') or '',
+                'liveRoomNo': r.get('live_room_no', '') or '',
+            } for r in rows] if rows else []
+            self._send({'code': 0, 'data': data})
+
         elif p.startswith('/api/livecommerce/order/page'):
             """订单分页+搜索"""
             from urllib.parse import urlparse, parse_qs
@@ -961,6 +1033,57 @@ class APIHandler(BaseHTTPRequestHandler):
             data.reverse()  # chronological order
             self._send({'code': 0, 'data': data})
 
+        elif p.startswith('/api/live/room/') and p.endswith('/danmaku-stats'):
+            """弹幕统计 - 消息数、类型分布、热门用户、活跃时段"""
+            parts = p.split('/')
+            room_id = parts[4] if len(parts) > 4 else ''
+            # Try exact match, then strip prefix
+            ids_to_try = [room_id]
+            if '_' in room_id:
+                prefix_parts = room_id.split('_', 2)
+                if len(prefix_parts) >= 3:
+                    ids_to_try.append(prefix_parts[2])
+            stats = None
+            for rid in ids_to_try:
+                rows = query_mysql(
+                    "SELECT COUNT(*) as total, "
+                    "SUM(danmaku_type='comment') as comments, "
+                    "SUM(danmaku_type='gift') as gifts, "
+                    "SUM(danmaku_type='enter') as enters, "
+                    "SUM(danmaku_type='like') as likes, "
+                    "SUM(danmaku_type='follow') as follows, "
+                    "MIN(event_time) as first_msg, MAX(event_time) as last_msg "
+                    "FROM rt_danmaku WHERE room_id=%s", (rid,))
+                if rows and rows[0]['total'] and rows[0]['total'] > 0:
+                    stats = rows[0]
+                    # Top commenters
+                    top = query_mysql(
+                        "SELECT user_name, COUNT(*) as cnt FROM rt_danmaku "
+                        "WHERE room_id=%s AND danmaku_type='comment' "
+                        "GROUP BY user_name ORDER BY cnt DESC LIMIT 5", (rid,))
+                    stats['top_users'] = [{'name': u['user_name'], 'count': int(u['cnt'])} for u in (top or [])]
+                    break
+            if stats:
+                duration_min = 1
+                if stats.get('first_msg') and stats.get('last_msg'):
+                    delta = (stats['last_msg'] - stats['first_msg']).total_seconds()
+                    duration_min = max(1, delta / 60)
+                self._send({'code': 0, 'data': {
+                    'total': int(stats['total'] or 0),
+                    'comments': int(stats.get('comments') or 0),
+                    'gifts': int(stats.get('gifts') or 0),
+                    'enters': int(stats.get('enters') or 0),
+                    'likes': int(stats.get('likes') or 0),
+                    'follows': int(stats.get('follows') or 0),
+                    'msgPerMin': round(int(stats['total'] or 0) / duration_min, 1),
+                    'firstMsg': stats['first_msg'].strftime('%H:%M:%S') if stats.get('first_msg') else '',
+                    'lastMsg': stats['last_msg'].strftime('%H:%M:%S') if stats.get('last_msg') else '',
+                    'durationMin': round(duration_min),
+                    'topUsers': stats.get('top_users', [])
+                }})
+            else:
+                self._send({'code': 0, 'data': None})
+
         elif p.startswith('/api/live/room/') and p.endswith('/products'):
             """获取房间商品列表"""
             parts = p.split('/')
@@ -1028,6 +1151,23 @@ class APIHandler(BaseHTTPRequestHandler):
             else:
                 data = [{'name': r['word'], 'value': int(r['total_freq'])} for r in rows]
             self._send({'code': 0, 'data': data})
+
+        elif p == '/api/crawler/anchor-stats':
+            """返回主播统计信息"""
+            rows = query_mysql(
+                "SELECT COUNT(DISTINCT anchor_name) as total_anchors, "
+                "  COUNT(*) as total_rooms, "
+                "  SUM(CASE WHEN status='live' THEN 1 ELSE 0 END) as live_rooms "
+                "FROM live_room WHERE deleted=0 AND anchor_name IS NOT NULL AND anchor_name != ''")
+            if rows:
+                r = rows[0]
+                self._send({'code': 0, 'data': {
+                    'totalAnchors': int(r.get('total_anchors', 0) or 0),
+                    'totalRooms': int(r.get('total_rooms', 0) or 0),
+                    'liveRooms': int(r.get('live_rooms', 0) or 0),
+                }})
+            else:
+                self._send({'code': 0, 'data': {'totalAnchors': 0, 'totalRooms': 0, 'liveRooms': 0}})
 
         else:
             self._send({'code': 0, 'data': {}, 'msg': 'OK'})
@@ -1296,7 +1436,7 @@ class APIHandler(BaseHTTPRequestHandler):
                     loop = asyncio.new_event_loop()
                     if platform == 'douyin':
                         from data_pipeline.douyin_crawler import DouyinLiveCrawler
-                        crawler = DouyinLiveCrawler(kafka_producer=_kafka_producer)
+                        crawler = DouyinLiveCrawler(kafka_producer=_kafka_producer, headless=True)
                         loop.run_until_complete(crawler.init_browser())
                         if mode == 'discovery':
                             rooms = loop.run_until_complete(crawler.discover_live_rooms(limit=20))
@@ -1471,6 +1611,108 @@ class APIHandler(BaseHTTPRequestHandler):
                 conn.commit(); conn.close()
             except: pass
             self._send({'code': 0, 'data': True, 'msg': '爬虫已停止'})
+
+        elif p == '/api/crawler/crawl-anchors':
+            """触发主播批量发现脚本（后台运行）"""
+            import subprocess as _sp
+            script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'crawl_douyin_anchors.py')
+            if not os.path.exists(script):
+                self._send({'code': 404, 'msg': 'crawl_douyin_anchors.py not found'})
+                return
+            global _anchor_crawl_pid
+            if _anchor_crawl_pid is not None:
+                try:
+                    os.kill(_anchor_crawl_pid, 0)
+                    self._send({'code': 0, 'data': {'status': 'running', 'pid': _anchor_crawl_pid}, 'msg': 'anchor crawl already running'})
+                    return
+                except Exception:
+                    _anchor_crawl_pid = None
+            try:
+                proc = _sp.Popen([sys.executable, script],
+                                 stdout=_sp.PIPE, stderr=_sp.PIPE,
+                                 creationflags=getattr(_sp, 'CREATE_NO_WINDOW', 0))
+                _anchor_crawl_pid = proc.pid
+                self._send({'code': 0, 'data': {'status': 'started', 'pid': proc.pid}, 'msg': 'anchor crawl started'})
+            except Exception as e:
+                self._send({'code': 500, 'msg': f'Failed to start: {e}'})
+
+        elif p == '/api/livecommerce/room/rotate-demo':
+            """手动触发 Demo 直播间轮换：模拟直播结束与新开播"""
+            import random as _rnd
+            try:
+                _rc = pymysql.connect(
+                    host=VMS['mysql'].split(':')[0], port=3306,
+                    user=USER, password=PWD, database=DB_NAME,
+                    charset='utf8mb4', connect_timeout=5)
+                _rcc = _rc.cursor()
+
+                # 过期 5~10 个 demo 直播间
+                _rcc.execute("SELECT COUNT(*) FROM live_room WHERE status='live' AND data_source='demo' AND deleted=0")
+                _cnt = _rcc.fetchone()[0]
+                expire_n = min(_rnd.randint(5, 10), max(0, _cnt - 25))
+                _expired = []
+                if expire_n > 0:
+                    _rcc.execute(
+                        "SELECT id FROM live_room WHERE status='live' AND data_source='demo' AND deleted=0 "
+                        "ORDER BY id ASC LIMIT %s", (expire_n,))
+                    _eids = [r[0] for r in _rcc.fetchall()]
+                    if _eids:
+                        _eph = ','.join(['%s'] * len(_eids))
+                        _rcc.execute(f"UPDATE live_room SET status='finished' WHERE id IN ({_eph})", _eids)
+                        _expired = _eids
+
+                # 补充新房间（有小黄车，排除刚过期的）
+                _rcc.execute("SELECT COUNT(*) FROM live_room WHERE status='live' AND data_source='demo' AND deleted=0")
+                _now = _rcc.fetchone()[0]
+                _need = 50 - _now
+                _promoted = []
+                if _need > 0:
+                    if _expired:
+                        _exph = ','.join(['%s'] * len(_expired))
+                        _rcc.execute(
+                            f"SELECT id FROM live_room WHERE status='finished' AND deleted=0 "
+                            f"AND has_shopping_cart=1 AND room_id_external IS NOT NULL AND room_id_external != '' "
+                            f"AND id NOT IN ({_exph}) ORDER BY RAND() LIMIT %s", _expired + [_need])
+                    else:
+                        _rcc.execute(
+                            "SELECT id FROM live_room WHERE status='finished' AND deleted=0 "
+                            "AND has_shopping_cart=1 AND room_id_external IS NOT NULL AND room_id_external != '' "
+                            "ORDER BY RAND() LIMIT %s", (_need,))
+                    _pids = [r[0] for r in _rcc.fetchall()]
+                    if _pids:
+                        _pph = ','.join(['%s'] * len(_pids))
+                        _rcc.execute(f"UPDATE live_room SET status='live', data_source='demo' WHERE id IN ({_pph})", _pids)
+                        _promoted = _pids
+
+                _rc.commit()
+                _rcc.execute("SELECT COUNT(*) FROM live_room WHERE status='live' AND data_source='demo' AND deleted=0")
+                _final = _rcc.fetchone()[0]
+                _rcc.close(); _rc.close()
+
+                self._send({'code': 0, 'data': {
+                    'expired': len(_expired), 'promoted': len(_promoted),
+                    'currentLive': _final
+                }, 'msg': f'轮换完成：{len(_expired)}个结束，{len(_promoted)}个新开播'})
+            except Exception as _re:
+                self._send({'code': 500, 'msg': f'轮换失败: {str(_re)[:80]}'})
+
+        elif p == '/api/livecommerce/room/refresh-live':
+            """刷新直播间 - 从抖音直播广场抓取当前真实直播的房间"""
+            import subprocess as _sp
+            try:
+                script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'refresh_live_rooms.py')
+                result = _sp.run(['python', script], capture_output=True, text=True, timeout=120,
+                    encoding='utf-8', errors='replace')
+                output = result.stdout.strip()
+                if result.returncode == 0:
+                    self._send({'code': 0, 'msg': output or '刷新完成'})
+                else:
+                    err = result.stderr.strip()[:200] if result.stderr else output
+                    self._send({'code': 500, 'msg': f'刷新脚本异常: {err}'})
+            except _sp.TimeoutExpired:
+                self._send({'code': 500, 'msg': '刷新超时(120s)'})
+            except Exception as _re:
+                self._send({'code': 500, 'msg': f'刷新失败: {str(_re)[:80]}'})
 
         elif p == '/api/danmaku/ingest':
             """
@@ -1898,7 +2140,7 @@ def _room_status_checker():
     定时房间状态检查器：每 15 分钟用 Playwright 实际验证直播间是否还在直播，
     自动将已结束的标记为 finished，保持直播中的标记为 live。
     """
-    CHECK_INTERVAL = 900  # 15 分钟
+    CHECK_INTERVAL = 300  # 5 分钟
     VERIFY_SCRIPT = os.path.join(BASE_DIR, '_verify_room_liveness.py')
 
     # 写入验证脚本（只在首次或脚本不存在时写入）
@@ -1923,6 +2165,7 @@ def get_candidates():
     cur.execute("SELECT room_id_external, room_name, anchor_name FROM live_room "
                 "WHERE status='live' AND deleted=0 AND data_source='real' "
                 "AND room_id_external IS NOT NULL AND room_id_external != '' "
+                "AND (start_time IS NULL OR start_time < DATE_SUB(NOW(), INTERVAL 2 HOUR)) "
                 "ORDER BY viewer_count DESC LIMIT %s", (MAX_ROOMS,))
     rooms = cur.fetchall()
     cur.close(); conn.close()
@@ -1952,33 +2195,38 @@ async def verify_rooms(candidates):
                     try:
                         rid = str(room.get('room_id_external', ''))
                         await page.goto(f'https://live.douyin.com/{rid}',
-                            wait_until='domcontentloaded', timeout=15000)
+                            wait_until='domcontentloaded', timeout=30000)
                         await page.wait_for_timeout(6000)
                         body = await page.evaluate('document.body?.innerText || ""')
                         if '已结束' in body or '直播已结束' in body:
                             return rid, 'ended'
                         has_video = await page.evaluate(
                             '(() => { const v = document.querySelector("video"); '
-                            'return !!(v && v.src && v.readyState > 0); })()')
+                            'if (!v) return false; '
+                            'if (v.readyState >= 2 && !v.paused) return true; '
+                            'if (v.src && v.readyState > 0) return true; '
+                            'return false; })()')
                         if not has_video and '直播中' not in body:
                             return rid, 'ended'
                         has_cart = await page.evaluate("""(() => {
                             var bt = document.body ? document.body.innerText : '';
-                            if (/购物车|去购物|去购买|正在卖/.test(bt)) return true;
-                            var els = document.querySelectorAll('div, span, button, a, i');
+                            if (/购物车|去购物|去购买|正在卖|商品|下单|小黄车|讲解中/.test(bt)) return true;
+                            if (/福利|秒杀|抢购|限时|链接|点击购/.test(bt)) return true;
+                            var els = document.querySelectorAll('div, span, button, a, i, img, svg');
                             for (var i = 0; i < els.length; i++) {
                                 var cn = els[i].className || '';
                                 if (typeof cn === 'string' &&
-                                    /shopping|cart|goods|product|commodity/i.test(cn)) return true;
+                                    /shopping|cart|goods|product|commodity|commerce|ec-|buy|shop/i.test(cn)) return true;
                                 var t = els[i].textContent || '';
-                                if (t.length < 10 && /购物车|去购物|去购买|正在卖/.test(t)) return true;
+                                if (t.length < 20 && /购物车|去购物|去购买|正在卖|商品|下单|小黄车|讲解中/.test(t)) return true;
                             }
                             try {
                                 var ch = window.__pace_f || [];
                                 for (var c = 0; c < ch.length; c++) {
                                     var s = JSON.stringify(ch[c]);
                                     if (s.includes('ShoppingCart') || s.includes('shopping_cart')
-                                        || s.includes('productList')) return true;
+                                        || s.includes('productList') || s.includes('commerce')
+                                        || s.includes('commodity') || s.includes('buyin')) return true;
                                 }
                             } catch(e) {}
                             return false;
@@ -2116,6 +2364,71 @@ if __name__ == '__main__':
         except Exception as e:
             print(f"  [StatusCheck] 异常: {str(e)[:80]}", flush=True)
 
+        # ── Demo 直播间自动过期 & 轮换 ──
+        try:
+            _dc = pymysql.connect(
+                host=VMS['mysql'].split(':')[0], port=3306,
+                user=USER, password=PWD, database=DB_NAME,
+                charset='utf8mb4', connect_timeout=5,
+            )
+            _dcc = _dc.cursor()
+            import random as _rnd
+
+            # 统计当前 demo 直播中数量
+            _dcc.execute("SELECT COUNT(*) FROM live_room WHERE status='live' AND data_source='demo' AND deleted=0")
+            demo_live_cnt = _dcc.fetchone()[0]
+
+            # 每轮过期 3~8 个 demo 直播间（模拟直播结束）
+            _expired_ids = []
+            if demo_live_cnt > 30:
+                expire_n = min(_rnd.randint(3, 8), demo_live_cnt - 25)
+                _dcc.execute(
+                    "SELECT id FROM live_room WHERE status='live' AND data_source='demo' AND deleted=0 "
+                    "ORDER BY id ASC LIMIT %s", (expire_n,))
+                expire_ids = [r[0] for r in _dcc.fetchall()]
+                if expire_ids:
+                    ph = ','.join(['%s'] * len(expire_ids))
+                    _dcc.execute(f"UPDATE live_room SET status='finished' WHERE id IN ({ph})", expire_ids)
+                    _expired_ids = expire_ids
+                    print(f"  [StatusCheck] Demo轮换: {len(expire_ids)}个直播间已结束", flush=True)
+
+            # 补充新的 demo 直播间（从已结束中选取有小黄车的，排除刚过期的）
+            _dcc.execute("SELECT COUNT(*) FROM live_room WHERE status='live' AND data_source='demo' AND deleted=0")
+            demo_live_now = _dcc.fetchone()[0]
+            TARGET_DEMO_LIVE = 50
+            if demo_live_now < TARGET_DEMO_LIVE:
+                need = TARGET_DEMO_LIVE - demo_live_now
+                if _expired_ids:
+                    ex_ph = ','.join(['%s'] * len(_expired_ids))
+                    _dcc.execute(
+                        f"SELECT id FROM live_room WHERE status='finished' AND deleted=0 "
+                        f"AND has_shopping_cart=1 AND room_id_external IS NOT NULL AND room_id_external != '' "
+                        f"AND id NOT IN ({ex_ph}) "
+                        f"ORDER BY viewer_count DESC LIMIT %s", _expired_ids + [need])
+                else:
+                    _dcc.execute(
+                        "SELECT id FROM live_room WHERE status='finished' AND deleted=0 "
+                        "AND has_shopping_cart=1 AND room_id_external IS NOT NULL AND room_id_external != '' "
+                        "ORDER BY viewer_count DESC LIMIT %s", (need,))
+                promote_ids = [r[0] for r in _dcc.fetchall()]
+                if promote_ids:
+                    ph2 = ','.join(['%s'] * len(promote_ids))
+                    _dcc.execute(
+                        f"UPDATE live_room SET status='live', data_source='demo' WHERE id IN ({ph2})", promote_ids)
+                    print(f"  [StatusCheck] Demo轮换: {len(promote_ids)}个新直播间开始直播", flush=True)
+
+            # 最终统计
+            _dcc.execute("SELECT status, data_source, COUNT(*) FROM live_room WHERE deleted=0 "
+                         "AND status IN ('live','finished') GROUP BY status, data_source")
+            stats = _dcc.fetchall()
+            for s, ds, cnt in stats:
+                print(f"  [StatusCheck] {ds}/{s}: {cnt}", flush=True)
+
+            _dcc.close()
+            _dc.close()
+        except Exception as _demo_err:
+            print(f"  [StatusCheck] Demo轮换异常: {str(_demo_err)[:80]}", flush=True)
+
         time.sleep(CHECK_INTERVAL)
 
 
@@ -2131,6 +2444,7 @@ def _auto_danmaku_collector():
     import asyncio
     import random as _rand
     MAX_MONITOR_ROOMS = 3  # 最多同时监控 3 个直播间（最大限度减少VM I/O压力防止VMware崩溃）
+    MAX_LIVE_DISCOVER = 120  # 预检目标：发现至少120个正在直播的带货直播间用于前端展示
 
     # ── 估算模型（与 run_crawl_and_estimate.py 共用逻辑） ──
     _CATEGORY_BENCHMARKS = {
@@ -2188,7 +2502,7 @@ def _auto_danmaku_collector():
             _logging.getLogger('kafka.conn').setLevel(_logging.ERROR)
             _logging.getLogger('kafka.client').setLevel(_logging.ERROR)
             _logging.getLogger('kafka.consumer').setLevel(_logging.ERROR)
-            crawler = DouyinLiveCrawler(kafka_producer=_kafka_producer)
+            crawler = DouyinLiveCrawler(kafka_producer=_kafka_producer, headless=True)
 
             # 先检查已保存的 Cookie 文件（不启动浏览器就能判断）
             import json as _json
@@ -2253,11 +2567,7 @@ def _auto_danmaku_collector():
 
             # 从 MySQL 读取当前直播间（scrape_rooms.py 已写入，含正确的 web_rid）
             try:
-                _conn = pymysql.connect(
-                    host=VMS['mysql'].split(':')[0], port=3306,
-                    user=USER, password=PWD, database=DB_NAME,
-                    charset='utf8mb4', connect_timeout=5,
-                )
+                _conn = _mysql_connect_retry(database=DB_NAME, max_retries=3, connect_timeout=15)
                 _cur = _conn.cursor(pymysql.cursors.DictCursor)
                 _cur.execute(
                     "SELECT room_id_external, room_name, anchor_name, viewer_count, "
@@ -2291,9 +2601,21 @@ def _auto_danmaku_collector():
                 live_rooms = []
                 pages = []
 
-                # 临时解除资源阻断，让页面完整渲染以正确检测存活状态
+                # 临时替换资源阻断规则：允许视频/脚本/XHR通过，仅阻断图片/CSS/字体
                 try:
                     await crawler._context.unroute('**/*')
+                except Exception:
+                    pass
+                try:
+                    async def _light_block_for_precheck(route):
+                        rt = route.request.resource_type
+                        if rt in ('stylesheet', 'font'):
+                            await route.abort()
+                        elif rt == 'image':
+                            await route.abort()
+                        else:
+                            await route.continue_()
+                    await crawler._context.route('**/*', _light_block_for_precheck)
                 except Exception:
                     pass
 
@@ -2304,7 +2626,7 @@ def _auto_danmaku_collector():
                         await page.goto(
                             f"https://live.douyin.com/{room['room_id']}",
                             wait_until='domcontentloaded',
-                            timeout=15000,
+                            timeout=30000,
                         )
                         await page.wait_for_timeout(6000)
 
@@ -2315,8 +2637,10 @@ def _auto_danmaku_collector():
 
                         has_video_src = await page.evaluate(
                             '(() => { const v = document.querySelector("video"); '
-                            'return !!(v && v.src && v.readyState > 0 '
-                            '&& !v.src.includes("placeholder")); })()'
+                            'if (!v) return false; '
+                            'if (v.readyState >= 2 && !v.paused) return true; '
+                            'if (v.src && v.readyState > 0 && !v.src.includes("placeholder")) return true; '
+                            'return false; })()'
                         )
                         rsc_status = await page.evaluate(
                             '(() => { try { const chunks = window.__pace_f || []; '
@@ -2340,25 +2664,33 @@ def _auto_danmaku_collector():
                         # ── 第二步：检查是否有小黄车（购物车），必须是带货直播间 ──
                         has_cart = await page.evaluate('''(() => {
                             var bodyText = document.body ? document.body.innerText : "";
-                            if (/购物车|去购物|去购买|正在卖/.test(bodyText)) return true;
-                            var els = document.querySelectorAll("div, span, button, a, i");
+                            if (/购物车|去购物|去购买|正在卖|商品|下单|小黄车|讲解中/.test(bodyText)) return true;
+                            if (/福利|秒杀|抢购|限时|链接|点击购/.test(bodyText)) return true;
+                            var hasPrice = /[\u00a5￥]\s*\d+/.test(bodyText);
+                            var els = document.querySelectorAll("div, span, button, a, i, img, svg");
                             for (var i = 0; i < els.length; i++) {
                                 var cn = els[i].className || "";
                                 if (typeof cn === "string" &&
-                                    /shopping|cart|goods|product|commodity/i.test(cn)) {
+                                    /shopping|cart|goods|product|commodity|commerce|ec-|buy|shop/i.test(cn)) {
                                     return true;
                                 }
                                 var t = els[i].textContent || "";
-                                if (t.length < 10 && /购物车|去购物|去购买|正在卖/.test(t)) {
+                                if (t.length < 20 && /购物车|去购物|去购买|正在卖|商品|下单|小黄车|讲解中/.test(t)) {
                                     return true;
                                 }
+                            }
+                            if (hasPrice) {
+                                var productEls = document.querySelectorAll("img[src*='product'], img[src*='goods'], img[src*='commodity'], img[src*='shop']");
+                                if (productEls.length > 0) return true;
                             }
                             try {
                                 var chunks = window.__pace_f || [];
                                 for (var c = 0; c < chunks.length; c++) {
                                     var s = JSON.stringify(chunks[c]);
                                     if (s.includes("ShoppingCart") || s.includes("shopping_cart")
-                                        || s.includes("productList") || s.includes("product_list")) {
+                                        || s.includes("productList") || s.includes("product_list")
+                                        || s.includes("commerce") || s.includes("commodity")
+                                        || s.includes("goodsDetail") || s.includes("buyin")) {
                                         return true;
                                     }
                                 }
@@ -2373,7 +2705,7 @@ def _auto_danmaku_collector():
                     except Exception:
                         return (False, 'ENDED')
 
-                batch_size = 5
+                batch_size = 15
                 for i in range(0, len(candidates), batch_size):
                     if len(live_rooms) >= need_count:
                         break
@@ -2421,9 +2753,114 @@ def _auto_danmaku_collector():
             _live_verified = []
             _ended_verified = []
 
+            async def _discover_live_from_douyin():
+                """Navigate to Douyin live pages and extract currently-live room web_rids."""
+                discovered = []
+                page = await crawler._context.new_page()
+                try:
+                    try:
+                        await crawler._context.unroute('**/*')
+                    except Exception:
+                        pass
+                    try:
+                        async def _light_block_discover(route):
+                            rt = route.request.resource_type
+                            if rt in ('stylesheet', 'font'):
+                                await route.abort()
+                            elif rt == 'image':
+                                await route.abort()
+                            else:
+                                await route.continue_()
+                        await crawler._context.route('**/*', _light_block_discover)
+                    except Exception:
+                        pass
+
+                    urls = [
+                        'https://live.douyin.com',
+                        'https://live.douyin.com/category/100106',
+                        'https://live.douyin.com/category/100102',
+                        'https://live.douyin.com/category/100104',
+                        'https://live.douyin.com/category/100101',
+                        'https://live.douyin.com/category/100103',
+                        'https://live.douyin.com/category/100105',
+                        'https://live.douyin.com/category/100107',
+                    ]
+                    for url in urls:
+                        try:
+                            await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                            await page.wait_for_timeout(5000)
+                            # 诊断：检查页面实际内容
+                            _diag = await page.evaluate("""(() => {
+                                const links = document.querySelectorAll('a[href]');
+                                const hrefs = [];
+                                for (let i = 0; i < Math.min(links.length, 10); i++) {
+                                    hrefs.push(links[i].href);
+                                }
+                                return {
+                                    url: location.href,
+                                    title: document.title,
+                                    bodyLen: (document.body ? document.body.innerText : '').length,
+                                    linkCount: links.length,
+                                    sampleHrefs: hrefs
+                                };
+                            })()""")
+                            print(f"  [Discover-Diag] {url}: url={_diag.get('url','?')[:60]} title={_diag.get('title','?')[:30]} bodyLen={_diag.get('bodyLen',0)} links={_diag.get('linkCount',0)}", flush=True)
+                            if _diag.get('sampleHrefs'):
+                                print(f"  [Discover-Diag]   sample: {_diag['sampleHrefs'][:3]}", flush=True)
+                            for _ in range(10):
+                                await page.evaluate('window.scrollBy(0, 1500)')
+                                await page.wait_for_timeout(1200)
+                            web_rids = await page.evaluate("""
+                                (() => {
+                                    const links = document.querySelectorAll('a[href]');
+                                    const rids = new Set();
+                                    for (const a of links) {
+                                        const m = a.href.match(/live\\.douyin\\.com\\/(\\d{3,15})/);
+                                        if (m && m[1].length >= 6) rids.add(m[1]);
+                                    }
+                                    return [...rids].slice(0, 80);
+                                })()
+                            """)
+                            for rid in web_rids:
+                                if rid not in seen:
+                                    seen.add(rid)
+                                    discovered.append({
+                                        'room_id': rid,
+                                        'room_name': f'抖音直播 {rid}',
+                                        'anchor_name': '',
+                                        'viewer_count': 0,
+                                        'live_url': f'https://live.douyin.com/{rid}',
+                                        'category': '',
+                                    })
+                            print(f"  [Discover] {url}: found {len(web_rids)} rooms", flush=True)
+                        except Exception as e:
+                            print(f"  [Discover] {url}: error {e}", flush=True)
+                        if len(discovered) >= 300:
+                            break
+
+                    try:
+                        async def _block_heavy_discover(route):
+                            rt = route.request.resource_type
+                            if rt in ('stylesheet', 'font', 'media'):
+                                await route.abort()
+                            elif rt == 'image':
+                                u = route.request.url
+                                if any(x in u for x in ['captcha', 'verify', 'slardar']):
+                                    await route.continue_()
+                                else:
+                                    await route.abort()
+                            else:
+                                await route.continue_()
+                        await crawler._context.route('**/*', _block_heavy_discover)
+                    except Exception:
+                        pass
+                finally:
+                    await page.close()
+                return discovered
+
             if rooms:
                 print(f"  [Danmaku] Pre-checking {len(rooms)} rooms for liveness...")
-                live_rooms = await _precheck_rooms(rooms, MAX_MONITOR_ROOMS)
+                live_rooms = await _precheck_rooms(rooms, MAX_LIVE_DISCOVER)
                 print(f"  [Danmaku] Pre-check result: {len(live_rooms)} rooms are LIVE out of {len(rooms)} checked")
                 _live_verified = [r['room_id'] for r in live_rooms]
                 _ended_verified = [r['room_id'] for r in rooms if r['room_id'] not in _live_verified]
@@ -2431,87 +2868,11 @@ def _auto_danmaku_collector():
                     rooms = live_rooms
                 else:
                     print("  [Danmaku] WARNING: No live rooms from DB. Discovering from Douyin live pages...")
-                    # ── 备用方案：从抖音直播页面实时发现活跃房间 ──
-                    async def _discover_live_from_douyin():
-                        """Navigate to Douyin live pages and extract currently-live room web_rids."""
-                        discovered = []
-                        page = await crawler._context.new_page()
-                        try:
-                            # 临时解除资源阻断以完整渲染页面
-                            try:
-                                await crawler._context.unroute('**/*')
-                            except Exception:
-                                pass
-
-                            urls = [
-                                'https://live.douyin.com',
-                                'https://live.douyin.com/category/100106',  # 电商
-                                'https://live.douyin.com/category/100102',  # 美妆
-                                'https://live.douyin.com/category/100104',  # 生活
-                            ]
-                            for url in urls:
-                                try:
-                                    await page.goto(url, wait_until='domcontentloaded', timeout=15000)
-                                    await page.wait_for_timeout(3000)
-                                    # 滚动以触发懒加载
-                                    for _ in range(3):
-                                        await page.evaluate('window.scrollBy(0, 1000)')
-                                        await page.wait_for_timeout(800)
-                                    # 提取直播间链接
-                                    web_rids = await page.evaluate("""
-                                        (() => {
-                                            const links = document.querySelectorAll('a[href]');
-                                            const rids = new Set();
-                                            for (const a of links) {
-                                                const m = a.href.match(/live\.douyin\.com\/(\d{3,15})/);
-                                                if (m && m[1].length >= 6) rids.add(m[1]);
-                                            }
-                                            return [...rids].slice(0, 30);
-                                        })()
-                                    """)
-                                    for rid in web_rids:
-                                        if rid not in seen:
-                                            seen.add(rid)
-                                            discovered.append({
-                                                'room_id': rid,
-                                                'room_name': f'抖音直播 {rid}',
-                                                'anchor_name': '',
-                                                'viewer_count': 0,
-                                                'live_url': f'https://live.douyin.com/{rid}',
-                                                'category': '',
-                                            })
-                                    print(f"  [Discover] {url}: found {len(web_rids)} rooms", flush=True)
-                                except Exception as e:
-                                    print(f"  [Discover] {url}: error {e}", flush=True)
-                                if len(discovered) >= 30:
-                                    break
-
-                            # 恢复资源阻断
-                            try:
-                                async def _block_heavy_discover(route):
-                                    rt = route.request.resource_type
-                                    if rt in ('stylesheet', 'font', 'media'):
-                                        await route.abort()
-                                    elif rt == 'image':
-                                        u = route.request.url
-                                        if any(x in u for x in ['captcha', 'verify', 'slardar']):
-                                            await route.continue_()
-                                        else:
-                                            await route.abort()
-                                    else:
-                                        await route.continue_()
-                                await crawler._context.route('**/*', _block_heavy_discover)
-                            except Exception:
-                                pass
-                        finally:
-                            await page.close()
-                        return discovered
-
                     try:
                         new_candidates = await _discover_live_from_douyin()
                         print(f"  [Discover] Total discovered: {len(new_candidates)} rooms from Douyin")
                         if new_candidates:
-                            live_rooms = await _precheck_rooms(new_candidates, MAX_MONITOR_ROOMS)
+                            live_rooms = await _precheck_rooms(new_candidates, MAX_LIVE_DISCOVER)
                             print(f"  [Discover] {len(live_rooms)} rooms are LIVE out of {len(new_candidates)} checked")
                             if live_rooms:
                                 rooms = live_rooms
@@ -2527,11 +2888,7 @@ def _auto_danmaku_collector():
             # ── 预检后立刻更新DB：未通过验证的房间标记为已结束 ──
             if _ended_verified:
                 try:
-                    _upd = pymysql.connect(
-                        host=VMS['mysql'].split(':')[0], port=3306,
-                        user=USER, password=PWD, database=DB_NAME,
-                        charset='utf8mb4', connect_timeout=5,
-                    )
+                    _upd = _mysql_connect_retry(database=DB_NAME, max_retries=2, connect_timeout=15)
                     _uc = _upd.cursor()
                     _ph = ','.join(['%s'] * len(_ended_verified))
                     _uc.execute(
@@ -2558,23 +2915,70 @@ def _auto_danmaku_collector():
                     print(f"  [Danmaku] DB status update error: {e}")
 
             if not rooms:
+                # DB中无候选房间或预检全部失败，尝试从抖音发现
+                print("  [Danmaku] No live rooms from DB. Discovering from Douyin live pages...", flush=True)
+                try:
+                    new_candidates = await _discover_live_from_douyin()
+                    print(f"  [Discover] Total discovered: {len(new_candidates)} rooms from Douyin")
+                    if new_candidates:
+                        live_rooms = await _precheck_rooms(new_candidates, MAX_LIVE_DISCOVER)
+                        print(f"  [Discover] {len(live_rooms)} rooms are LIVE out of {len(new_candidates)} checked")
+                        if live_rooms:
+                            rooms = live_rooms
+                            _live_verified = [r['room_id'] for r in live_rooms]
+                            _ended_verified = [r['room_id'] for r in new_candidates if r['room_id'] not in _live_verified]
+                except Exception as e:
+                    print(f"  [Discover] Error: {e}")
+
+            # ── 补充策略：从DB已有的10662个房间中随机抽样预检 ──
+            if len(rooms) < MAX_LIVE_DISCOVER:
+                try:
+                    _sample_conn = _mysql_connect_retry(database=DB_NAME, max_retries=2, connect_timeout=15)
+                    _sample_cur = _sample_conn.cursor(pymysql.cursors.DictCursor)
+                    # 排除已验证的房间，优先抽样高浏览量房间（更可能在播）
+                    _exclude = set(r.get('room_id', '') for r in rooms) if rooms else set()
+                    _sample_cur.execute(
+                        "SELECT room_id_external, room_name, anchor_name, viewer_count, "
+                        "live_url, category FROM live_room "
+                        "WHERE deleted=0 AND room_id_external IS NOT NULL AND room_id_external != '' "
+                        "AND category NOT IN ('游戏','娱乐','知识','体育') "
+                        "ORDER BY viewer_count * RAND() DESC LIMIT 600")
+                    _db_candidates = _sample_cur.fetchall()
+                    _sample_cur.close()
+                    _sample_conn.close()
+                    # 过滤掉已验证的
+                    _db_candidates = [c for c in _db_candidates
+                                      if c.get('room_id_external', '') not in _exclude]
+                    if _db_candidates:
+                        _db_cands = [{
+                            'room_id': c['room_id_external'],
+                            'room_name': c.get('room_name', ''),
+                            'anchor_name': c.get('anchor_name', ''),
+                            'viewer_count': int(c.get('viewer_count') or 0),
+                            'live_url': c.get('live_url', '') or f"https://live.douyin.com/{c['room_id_external']}",
+                            'category': c.get('category', ''),
+                        } for c in _db_candidates]
+                        print(f"  [DB-Sample] Sampling {len(_db_cands)} random rooms from DB for precheck...", flush=True)
+                        _db_live = await _precheck_rooms(_db_cands, MAX_LIVE_DISCOVER - len(rooms))
+                        if _db_live:
+                            print(f"  [DB-Sample] Found {len(_db_live)} additional live rooms from DB sample")
+                            rooms.extend(_db_live)
+                            _live_verified.extend(r['room_id'] for r in _db_live)
+                except Exception as e:
+                    print(f"  [DB-Sample] Error: {e}")
+
+            if not rooms:
                 print("  [Danmaku] No live rooms found, skipping danmaku collection")
                 await crawler.close()
                 return
 
-            rooms = rooms[:MAX_MONITOR_ROOMS]
-
-            # 对每个房间应用估算模型（在线人数真实，订单/GMV 估算）
+            # ── 先把所有验证通过的直播间写入DB（用于前端展示） ──
             for r in rooms:
                 _estimate(r)
-            print(f"  [Danmaku] Applied estimation model to {len(rooms)} rooms")
-
-            # 写入 MySQL（真实房间数据）
+            print(f"  [Danmaku] Applied estimation model to {len(rooms)} verified live rooms")
             try:
-                conn = pymysql.connect(host=VMS['mysql'].split(':')[0], port=3306, user=USER,
-                                       password=PWD, database=DB_NAME,
-                                       charset='utf8mb4', connect_timeout=5)
-                cur = conn.cursor()
+                _bulk_conn = _mysql_connect_retry(database=DB_NAME, max_retries=3, connect_timeout=15)
+                _bc = _bulk_conn.cursor()
                 for r in rooms:
                     rid = str(r.get('room_id', ''))
                     plat = 'douyin'
@@ -2585,8 +2989,7 @@ def _auto_danmaku_collector():
                     orders = int(r.get('order_count', 0))
                     gmv = float(r.get('gmv', 0))
                     danmaku = _rand.randint(50, max(100, viewers // 2))
-                    # 写入 rt_room_stats
-                    cur.execute(
+                    _bc.execute(
                         "INSERT INTO rt_room_stats "
                         "(room_id, room_name, anchor_name, platform, category, "
                         "status, current_viewers, peak_viewers, total_danmaku, "
@@ -2599,35 +3002,39 @@ def _auto_danmaku_collector():
                         "peak_viewers=VALUES(peak_viewers), "
                         "total_danmaku=VALUES(total_danmaku), total_orders=VALUES(total_orders), "
                         "total_gmv=VALUES(total_gmv), live_url=VALUES(live_url), "
-                        "cover_url=VALUES(cover_url), update_time=NOW()",
+                        "status='live', cover_url=VALUES(cover_url), update_time=NOW()",
                         (rid, r.get('room_name', ''), r.get('anchor_name', ''),
                          plat, r.get('category', '带货'),
                          viewers, peak, danmaku, orders, gmv,
                          live_url, r.get('cover_url', '')))
-                    # 写入 live_room
-                    cur.execute(
+                    _bc.execute(
                         "INSERT INTO live_room "
                         "(room_no, room_name, anchor_name, platform, category, status, "
                         "viewer_count, order_count, gmv, conversion_rate, live_url, "
-                        "room_id_external, data_source, start_time) "
-                        "VALUES (%s,%s,%s,%s,%s,'live',%s,%s,%s,%s,%s,%s,'real',NOW()) "
+                        "room_id_external, data_source, has_shopping_cart, start_time) "
+                        "VALUES (%s,%s,%s,%s,%s,'live',%s,%s,%s,%s,%s,%s,'real',1,NOW()) "
                         "ON DUPLICATE KEY UPDATE "
                         "room_name=VALUES(room_name), anchor_name=VALUES(anchor_name), "
                         "viewer_count=VALUES(viewer_count), category=VALUES(category), "
                         "order_count=VALUES(order_count), "
                         "gmv=VALUES(gmv), status='live', "
-                        "live_url=VALUES(live_url), data_source='real'",
+                        "live_url=VALUES(live_url), data_source='real', has_shopping_cart=1",
                         (room_no, r.get('room_name', ''), r.get('anchor_name', ''),
                          plat, r.get('category', '带货'),
                          viewers, orders, gmv,
                          float(r.get('conversion_rate', 0)),
                          live_url, rid))
-                conn.commit()
-                cur.close()
-                conn.close()
-                print(f"  [Danmaku] Wrote {len(rooms)} real rooms to MySQL")
+                _bulk_conn.commit()
+                _bc.close()
+                _bulk_conn.close()
+                print(f"  [Danmaku] Wrote {len(rooms)} live rooms to MySQL for display")
             except Exception as e:
-                print(f"  [Danmaku] MySQL write failed: {e}")
+                print(f"  [Danmaku] Bulk MySQL write failed: {e}")
+
+            # ── 只取前 MAX_MONITOR_ROOMS 个房间进行弹幕监控（节省资源） ──
+            rooms = rooms[:MAX_MONITOR_ROOMS]
+
+            # （所有验证通过的直播间已在上方写入MySQL，这里只取前N个进行弹幕监控）
 
             # 启动弹幕监控（并发监控多个房间）—— 抖音弹幕不需要登录即可接收
             if not logged_in:
@@ -2788,11 +3195,7 @@ def _auto_danmaku_collector():
                     # 写入 rt_product
                     if products:
                         try:
-                            conn = pymysql.connect(
-                                host=VMS['mysql'].split(':')[0], port=3306,
-                                user=USER, password=PWD, database=DB_NAME,
-                                charset='utf8mb4', connect_timeout=5,
-                            )
+                            conn = _mysql_connect_retry(database=DB_NAME, max_retries=2, connect_timeout=15)
                             cur = conn.cursor()
                             for i, p in enumerate(products):
                                 cur.execute("""
@@ -2923,11 +3326,7 @@ def _auto_danmaku_collector():
                             else:
                                 buffer_snapshot = []
 
-                        conn = pymysql.connect(
-                            host=VMS['mysql'].split(':')[0], port=3306,
-                            user=USER, password=PWD, database=DB_NAME,
-                            charset='utf8mb4', connect_timeout=5,
-                        )
+                        conn = _mysql_connect_retry(database=DB_NAME, max_retries=2, connect_timeout=15)
                         cur = conn.cursor()
 
                         # 刷入计数器

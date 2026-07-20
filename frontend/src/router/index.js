@@ -12,6 +12,7 @@ const routes = [
       { path: 'live-room', name: 'LiveRoom', component: () => import('@/views/liveroom/Index.vue'), meta: { title: '直播间', icon: 'VideoCamera' } },
       { path: 'live-room/:roomId', name: 'LiveRoomDetail', component: () => import('@/views/liveroom/Detail.vue'), meta: { title: '直播间详情' } },
       { path: 'anchor', name: 'Anchor', component: () => import('@/views/anchor/Index.vue'), meta: { title: '主播', icon: 'UserFilled' } },
+      { path: 'anchor-search', name: 'AnchorSearch', component: () => import('@/views/anchor/Search.vue'), meta: { title: '主播搜索', icon: 'Search' } },
       { path: 'order', name: 'Order', component: () => import('@/views/order/Index.vue'), meta: { title: '订单', icon: 'List' } },
       { path: 'realtime', name: 'Realtime', component: () => import('@/views/dashboard/Realtime.vue'), meta: { title: '实时直播', icon: 'VideoPlay' } },
       { path: 'bigscreen', name: 'BigScreen', component: () => import('@/views/dashboard/BigScreen.vue'), meta: { title: '数据大屏', icon: 'DataLine' } },

@@ -86,6 +86,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ElMessage } from 'element-plus'
 import { getOrderPage, getOrderOverview } from '@/api'
 import { subscribeEvents } from '@/utils/sse'
 
@@ -138,14 +139,12 @@ const handleSSE = (event) => {
     incStat('totalOrders', 1)
     incStat('pendingOrders', 1)
     stats.value.totalAmount = (stats.value.totalAmount || 0) + (event.totalAmount || event.amount || 0)
-    if (activeTab.value === 'all' || activeTab.value === 'pending' || activeTab.value === 'active') {
-      tableData.value.unshift({
+    tableData.value.unshift({
         id: event.oid, orderNo: event.orderNo, productName: event.productName || event.product,
         roomName: event.roomName || '', username: event.username || event.user || '',
         quantity: event.quantity || 1, totalAmount: event.totalAmount || event.amount || 0,
         status: 'pending', createTime: event.createTime || ''
       })
-    }
   } else if (event.type === 'order_paid') {
     incStat('pendingOrders', -1)
     incStat('paidOrders', 1)
@@ -219,14 +218,6 @@ const handleAction = async (row, action) => {
       ElMessage.warning(data.msg)
     }
   } catch { ElMessage.error('操作失败') }
-}
-
-const handleRefund = (row) => {
-  refundForm.orderNo = row.orderNo
-  refundForm.productName = row.productName
-  refundForm.reason = ''
-  refundForm.note = ''
-  refundVisible.value = true
 }
 
 onMounted(() => {

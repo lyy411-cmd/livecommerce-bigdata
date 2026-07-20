@@ -54,26 +54,31 @@ async def verify_rooms(candidates):
                             return rid, 'ended'
                         has_video = await page.evaluate(
                             '(() => { const v = document.querySelector("video"); '
-                            'return !!(v && v.src && v.readyState > 0); })()')
+                            'if (!v) return false; '
+                            'if (v.readyState >= 2 && !v.paused) return true; '
+                            'if (v.src && v.readyState > 0) return true; '
+                            'return false; })()')
                         if not has_video and '直播中' not in body:
                             return rid, 'ended'
                         has_cart = await page.evaluate("""(() => {
                             var bt = document.body ? document.body.innerText : '';
-                            if (/购物车|去购物|去购买|正在卖/.test(bt)) return true;
-                            var els = document.querySelectorAll('div, span, button, a, i');
+                            if (/购物车|去购物|去购买|正在卖|商品|下单|小黄车|讲解中/.test(bt)) return true;
+                            if (/福利|秒杀|抢购|限时|链接|点击购/.test(bt)) return true;
+                            var els = document.querySelectorAll('div, span, button, a, i, img, svg');
                             for (var i = 0; i < els.length; i++) {
                                 var cn = els[i].className || '';
                                 if (typeof cn === 'string' &&
-                                    /shopping|cart|goods|product|commodity/i.test(cn)) return true;
+                                    /shopping|cart|goods|product|commodity|commerce|ec-|buy|shop/i.test(cn)) return true;
                                 var t = els[i].textContent || '';
-                                if (t.length < 10 && /购物车|去购物|去购买|正在卖/.test(t)) return true;
+                                if (t.length < 20 && /购物车|去购物|去购买|正在卖|商品|下单|小黄车|讲解中/.test(t)) return true;
                             }
                             try {
                                 var ch = window.__pace_f || [];
                                 for (var c = 0; c < ch.length; c++) {
                                     var s = JSON.stringify(ch[c]);
                                     if (s.includes('ShoppingCart') || s.includes('shopping_cart')
-                                        || s.includes('productList')) return true;
+                                        || s.includes('productList') || s.includes('commerce')
+                                        || s.includes('commodity') || s.includes('buyin')) return true;
                                 }
                             } catch(e) {}
                             return false;

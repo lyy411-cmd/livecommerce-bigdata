@@ -39,6 +39,10 @@
       </div>
     </div>
 
+    <div class="demo-banner" v-if="isDemoMode">
+      <span>◇ 后端服务不可用，当前显示示例数据 · 启动后端后自动切换为真实数据</span>
+    </div>
+
     <div class="data-summary">
       <span>数据总量：{{ summary.rooms }} 个直播间 | {{ summary.anchors }} 位主播 | {{ summary.orders }} 条订单 | 最新采集：{{ summary.last }}</span>
     </div>
@@ -49,6 +53,9 @@
 import { ref, onMounted, onBeforeUnmount } from 'vue'
 import * as echarts from 'echarts'
 import { getDashboardKpi, getCategoryDistribution, getAnchorRank, getCategoryRank, getGmvTrend, getActivities } from '@/api'
+import { fallback } from '@/utils/fallback'
+
+const isDemoMode = ref(false)
 
 const kpis = ref([
   { label: '总GMV', value: '--', change: '0', up: true, sub: '抖音累计', color: '#00ffcc' },
@@ -74,7 +81,8 @@ const c1 = ref(), c2 = ref(), c3 = ref(), c4 = ref(), c5 = ref()
 let charts = []
 
 async function fetchAll() {
-  const kpi = await getDashboardKpi()
+  try {
+  const kpi = await getDashboardKpi().catch(() => { isDemoMode.value = true; return fallback.kpi() })
   const k = kpi.data
   const gmvYi = k.totalGmv / 1e8
   kpis.value[0].value = '￥' + (gmvYi < 1 ? (k.totalGmv/1e4).toFixed(1)+'万' : gmvYi.toFixed(1)+'亿')
@@ -91,9 +99,9 @@ async function fetchAll() {
   // kpis.value[i].change = (Math.random() * 25 - 5).toFixed(1)
 
   const [pf, an, cat] = await Promise.all([
-    getCategoryDistribution(),
-    getAnchorRank(50),
-    getCategoryRank()
+    getCategoryDistribution().catch(() => fallback.categoryDistribution()),
+    getAnchorRank(50).catch(() => fallback.anchorRank()),
+    getCategoryRank().catch(() => fallback.categoryRank())
   ])
   summary.value.last = new Date().toLocaleTimeString()
 
@@ -108,7 +116,7 @@ async function fetchAll() {
 
   // 趋势 - from API
   try {
-    const gmvRes = await getGmvTrend()
+    const gmvRes = await getGmvTrend().catch(() => fallback.gmvTrend())
     const gmvData = gmvRes.data || []
     if (c1.value) charts.push(echarts.init(c1.value).setOption({
       ...darkTheme,
@@ -256,11 +264,12 @@ async function fetchAll() {
     }
     }
   }
+  } catch (e) { console.error('[Dashboard] fetch error:', e) }
 }
 
 async function fetchActivities() {
   try {
-    const acts = await getActivities()
+    const acts = await getActivities().catch(() => fallback.activities())
     if (acts && acts.data && acts.data.length > 0) activities.value = acts.data
   } catch (e) {}
 }
@@ -330,4 +339,9 @@ onBeforeUnmount(() => {
   padding: 10px 16px; background: rgba(15,20,30,0.4); border: 1px solid rgba(0,255,204,0.08);
   border-radius: 6px; text-align: center; font-size: 11px; color: rgba(255,255,255,0.25);
 }
+.demo-banner {
+  padding: 8px 16px; background: rgba(255,165,2,0.1); border: 1px solid rgba(255,165,2,0.3);
+  border-radius: 6px; text-align: center; font-size: 12px; color: #ffa502; animation: pulse-border 2s infinite;
+}
+@keyframes pulse-border { 0%,100% { border-color: rgba(255,165,2,0.3); } 50% { border-color: rgba(255,165,2,0.6); } }
 </style>

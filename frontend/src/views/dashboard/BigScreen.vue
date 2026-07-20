@@ -96,6 +96,7 @@
 import { ref, reactive, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import * as echarts from 'echarts'
 import { getRealtimeData, getGeoDistribution, getLiveRooms, getHotwords } from '@/api'
+import { fallback } from '@/utils/fallback'
 
 const realtime = reactive({})
 const liveRooms = ref([])
@@ -115,7 +116,11 @@ const updateTime = () => { currentTime.value = new Date().toLocaleTimeString() }
 
 const fetchData = async () => {
   try {
-    const [r, rooms, hw] = await Promise.all([getRealtimeData(), getLiveRooms(), getHotwords().catch(() => ({ data: [] }))])
+    const [r, rooms, hw] = await Promise.all([
+      getRealtimeData().catch(() => fallback.realtimeData()),
+      getLiveRooms().catch(() => fallback.liveRooms()),
+      getHotwords().catch(() => fallback.hotwords())
+    ])
     Object.assign(realtime, r.data)
     liveRooms.value = rooms.data || []
     hotwords.value = hw.data || []
@@ -147,7 +152,7 @@ onMounted(async () => {
   await nextTick()
   updateTime()
   await fetchData()
-  const geo = await getGeoDistribution()
+  const geo = await getGeoDistribution().catch(() => fallback.geoDistribution())
   initChart(geo)
   timer = setInterval(() => { updateTime(); fetchData() }, 5000)
 })

@@ -18,9 +18,9 @@
       <div class="section-header">
         <h3>直播中 ({{ liveRooms.length }} 个)</h3>
         <div class="sort-btns">
-          <button :class="{ active: sortBy === 'viewer_count' }" @click="sortBy = 'viewer_count'">观众</button>
+          <button :class="{ active: sortBy === 'viewerCount' }" @click="sortBy = 'viewerCount'">观众</button>
           <button :class="{ active: sortBy === 'gmv' }" @click="sortBy = 'gmv'">GMV</button>
-          <button :class="{ active: sortBy === 'order_count' }" @click="sortBy = 'order_count'">订单</button>
+          <button :class="{ active: sortBy === 'orderCount' }" @click="sortBy = 'orderCount'">订单</button>
         </div>
       </div>
 
@@ -51,13 +51,14 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { getRealtimeRooms, getRoomPage } from '@/api'
+import { fallback } from '@/utils/fallback'
 
 const router = useRouter()
 const goRoomDetail = (r) => { router.push(`/live-room/${r.roomId || r.id}`) }
 const openLiveUrl = (url) => { window.open(url, '_blank') }
 
 const liveRooms = ref([])
-const sortBy = ref('viewer_count')
+const sortBy = ref('viewerCount')
 const kpis = ref([
   { label: '直播中', value: '...', sub: '活跃房间', color: '#00ffcc' },
   { label: '总观众', value: '...', sub: '累计在线', color: '#00d9ff' },
@@ -83,7 +84,7 @@ async function fetchData() {
     // 先尝试从 rt_room_stats 获取真实爬虫数据
     let rooms = []
     try {
-      const rtRes = await getRealtimeRooms()
+      const rtRes = await getRealtimeRooms().catch(() => fallback.liveRooms())
       if (rtRes?.code === 0 && rtRes?.data?.length > 0) {
         rooms = rtRes.data.map(r => ({
           id: r.roomId,
@@ -102,8 +103,8 @@ async function fetchData() {
 
     // Fallback: 从 live_room 表获取
     if (rooms.length === 0) {
-      const res = await getRoomPage({ page: 1, pageSize: 200 })
-      const allRooms = res?.data?.records || []
+      const res = await getRoomPage({ page: 1, pageSize: 200 }).catch(() => fallback.liveRooms())
+      const allRooms = res?.data?.records || res?.data || []
       rooms = allRooms.filter(r => r.status === 'live' && r.liveUrl).map(r => ({ ...r }))
     }
 

@@ -60,6 +60,12 @@ chromedriver-win64/
 # 爬虫数据（不应提交 - 含敏感信息和大缓存）
 data_pipeline/browser_profiles/
 data_pipeline/cookies/
+browser_profile/
+browser_profile2/
+browser_profile3/
+browser_profile4/
+browser_profile5/
+browser_profile6/
 
 # 临时日志和调试输出
 backend_log.txt

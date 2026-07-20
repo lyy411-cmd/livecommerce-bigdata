@@ -21,6 +21,8 @@ export const getRoomDetail = (id) => request.get('/livecommerce/room/detail', { 
 export const createRoom = (data) => request.post('/livecommerce/room/create', data)
 export const updateRoom = (data) => request.put('/livecommerce/room/update', data)
 export const deleteRoom = (id) => request.delete('/livecommerce/room/delete', { params: { id } })
+export const rotateDemoRooms = () => request.post('/livecommerce/room/rotate-demo')
+export const refreshLiveRooms = () => request.post('/livecommerce/room/refresh-live')
 
 // ===== 主播 =====
 export const getAnchorPage = (params) => request.get('/livecommerce/anchor/page', { params })
@@ -29,6 +31,7 @@ export const getAnchorDetail = (id) => request.get('/livecommerce/anchor/detail'
 export const createAnchor = (data) => request.post('/livecommerce/anchor/create', data)
 export const updateAnchor = (data) => request.put('/livecommerce/anchor/update', data)
 export const deleteAnchor = (id) => request.delete('/livecommerce/anchor/delete', { params: { id } })
+export const searchAnchors = (params) => request.get('/livecommerce/anchor/search', { params })
 
 // ===== 订单 =====
 export const getOrderPage = (params) => request.get('/livecommerce/order/page', { params })
@@ -58,6 +61,7 @@ export const getActivities = () => request.get('/datavis/dashboard/activities')
 // ===== 实时直播数据 =====
 export const getRealtimeRooms = () => request.get('/live/rooms')
 export const getRoomDanmaku = (roomId, limit = 100) => request.get(`/live/room/${roomId}/danmaku`, { params: { limit } })
+export const getRoomDanmakuStats = (roomId) => request.get(`/live/room/${roomId}/danmaku-stats`)
 export const getRoomProducts = (roomId) => request.get(`/live/room/${roomId}/products`)
 export const getHotwords = () => request.get('/datavis/dashboard/hotwords')
 
@@ -65,3 +69,5 @@ export const getHotwords = () => request.get('/datavis/dashboard/hotwords')
 export const getCrawlerStatus = () => request.get('/crawler/status')
 export const startCrawler = (data) => request.post('/crawler/start', data)
 export const stopCrawler = () => request.post('/crawler/stop')
+export const crawlAnchors = () => request.post('/crawler/crawl-anchors')
+export const getAnchorStats = () => request.get('/crawler/anchor-stats')
