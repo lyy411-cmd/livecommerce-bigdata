@@ -22,7 +22,7 @@
     </div>
 
     <div class="detail-body">
-      <!-- 左侧: 信息 + 统计 + 商品 -->
+      <!-- 左侧: 信息 + 统计 -->
       <div class="detail-left">
         <!-- 基础信息 -->
         <div class="info-card">
@@ -110,27 +110,6 @@
           </div>
         </div>
 
-        <!-- 商品货架 -->
-        <div class="products-card">
-          <h3>商品货架 ({{ products.length }})</h3>
-          <div class="product-list" v-if="products.length">
-            <div class="product-item" v-for="(p, idx) in products" :key="p.productId || idx">
-              <div class="product-rank">{{ idx + 1 }}</div>
-              <div class="product-img-box">
-                <div class="product-img placeholder">📦</div>
-              </div>
-              <div class="product-info">
-                <p class="product-name">{{ p.productName }}</p>
-                <div class="product-meta">
-                  <span class="price">{{ p.price }}</span>
-                  <span v-if="p.originalPrice && p.originalPrice > p.price" class="original-price">{{ p.originalPrice }}</span>
-                  <span class="sales">已售 {{ formatNum(p.sales) }}</span>
-                </div>
-              </div>
-            </div>
-          </div>
-          <el-empty v-else description="暂无商品数据" :image-size="50" />
-        </div>
       </div>
 
       <!-- 右侧: 弹幕 -->
@@ -156,12 +135,11 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import DanmakuViewer from '@/components/DanmakuViewer.vue'
-import { getLiveRooms, getRoomPage, getRoomProducts, getRoomDanmakuStats } from '@/api'
+import { getLiveRooms, getRoomPage, getRoomDanmakuStats } from '@/api'
 
 const route = useRoute()
 const roomId = ref(route.params.roomId || '')
 const room = ref({})
-const products = ref([])
 const dmStats = ref({ total: 0, comments: 0, gifts: 0, enters: 0, likes: 0, follows: 0, msgPerMin: 0, topUsers: [], firstMsg: '', lastMsg: '', durationMin: 0 })
 
 const isLive = computed(() => room.value.status === 'live')
@@ -216,15 +194,6 @@ async function loadRoomInfo() {
   }
 }
 
-async function loadProducts() {
-  try {
-    const res = await getRoomProducts(roomId.value)
-    if (res?.data) {
-      products.value = Array.isArray(res.data) ? res.data : []
-    }
-  } catch {}
-}
-
 async function loadDanmakuStats() {
   try {
     const res = await getRoomDanmakuStats(roomId.value)
@@ -237,7 +206,6 @@ async function loadDanmakuStats() {
 let refreshTimer
 onMounted(() => {
   loadRoomInfo()
-  loadProducts()
   loadDanmakuStats()
   refreshTimer = setInterval(() => {
     loadRoomInfo()
@@ -268,7 +236,7 @@ onBeforeUnmount(() => clearInterval(refreshTimer))
 .detail-left::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
 .detail-right { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
-.info-card, .stats-card, .products-card, .danmaku-card {
+.info-card, .stats-card, .danmaku-card {
   background: rgba(15,20,30,0.5); border: 1px solid rgba(255,255,255,0.06);
   border-radius: 10px; padding: 14px;
 }
@@ -282,7 +250,7 @@ onBeforeUnmount(() => clearInterval(refreshTimer))
 .info-item .gmv { color: #ffa502; }
 
 /* Stats panel */
-.stats-card h3, .products-card h3 { font-size: 13px; color: rgba(255,255,255,0.5); margin: 0 0 10px; font-weight: 500; }
+.stats-card h3 { font-size: 13px; color: rgba(255,255,255,0.5); margin: 0 0 10px; font-weight: 500; }
 .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px; }
 .stat-item { text-align: center; padding: 6px 4px; background: rgba(255,255,255,0.02); border-radius: 6px; }
 .stat-value { font-size: 18px; font-weight: 700; font-family: 'Courier New', monospace; color: #f0f0f0; }
@@ -312,23 +280,6 @@ onBeforeUnmount(() => clearInterval(refreshTimer))
 /* Time range */
 .time-range { font-size: 11px; color: rgba(255,255,255,0.3); display: flex; justify-content: space-between; }
 .duration { color: rgba(255,255,255,0.4); }
-
-/* Products */
-.product-list { display: flex; flex-direction: column; gap: 6px; max-height: 260px; overflow-y: auto; }
-.product-list::-webkit-scrollbar { width: 3px; }
-.product-list::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 2px; }
-.product-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: rgba(255,255,255,0.02); border-radius: 6px; transition: background 0.2s; }
-.product-item:hover { background: rgba(0,255,204,0.04); }
-.product-rank { font-size: 11px; color: rgba(255,255,255,0.2); font-weight: 700; width: 16px; text-align: center; flex-shrink: 0; }
-.product-img-box { flex-shrink: 0; }
-.product-img { width: 40px; height: 40px; border-radius: 4px; }
-.product-img.placeholder { display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.05); font-size: 18px; }
-.product-info { flex: 1; min-width: 0; }
-.product-name { font-size: 12px; color: #ddd; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.product-meta { display: flex; gap: 6px; align-items: center; margin-top: 3px; }
-.price { color: #ff4757; font-weight: 700; font-size: 13px; }
-.original-price { color: rgba(255,255,255,0.25); text-decoration: line-through; font-size: 10px; }
-.sales { color: rgba(255,255,255,0.35); font-size: 10px; }
 
 /* Danmaku card */
 .danmaku-card { display: flex; flex-direction: column; flex: 1; min-height: 0; }

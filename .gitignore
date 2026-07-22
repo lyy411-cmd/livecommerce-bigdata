@@ -66,12 +66,14 @@ browser_profile3/
 browser_profile4/
 browser_profile5/
 browser_profile6/
+browser_profile_refresh/
 
 # 临时日志和调试输出
 backend_log.txt
 debug_page.txt
 ks_search_test.txt
 ks_test_result.txt
+cluster_log*.txt
 
 # Chrome扩展开发临时产物（如需提交请移除此行）
 # chrome_extension/

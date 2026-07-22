@@ -450,24 +450,23 @@ class DouyinLiveCrawler:
             )
             self._temp_profile = tmp_profile
 
-        # ── 阻断重型资源（图片/CSS/字体/媒体），只保留脚本和 WebSocket ──
-        # 弹幕监控只需要 WebSocket 帧，不需要页面视觉渲染
-        # 这可以减少 70-80% 的网络 I/O，大幅降低 VMware VMDK 压力
-        async def _block_heavy_resources(route):
-            rt = route.request.resource_type
-            if rt in ('stylesheet', 'font', 'media'):
-                await route.abort()
-            elif rt == 'image':
-                # 阻断大部分图片，但保留小图标和验证码
-                url = route.request.url
-                if any(x in url for x in ['captcha', 'verify', 'slardar']):
-                    await route.continue_()
-                else:
-                    await route.abort()
-            else:
-                await route.continue_()
-        await self._context.route('**/*', _block_heavy_resources)
-        logger.info("已启用资源阻断（屏蔽图片/CSS/字体/媒体，减少I/O压力）")
+        # ── 资源阻断已禁用 ──
+        # 弹幕 SDK 需要完整加载所有资源（CSS/图片等）才能正确建立 WebSocket。
+        # 之前尝试阻断资源导致 WS 无法建立。
+        # async def _block_heavy_resources(route):
+        #     rt = route.request.resource_type
+        #     if rt in ('stylesheet', 'font', 'media'):
+        #         await route.abort()
+        #     elif rt == 'image':
+        #         url = route.request.url
+        #         if any(x in url for x in ['captcha', 'verify', 'slardar']):
+        #             await route.continue_()
+        #         else:
+        #             await route.abort()
+        #     else:
+        #         await route.continue_()
+        # await self._context.route('**/*', _block_heavy_resources)
+        logger.info("资源阻断已禁用（弹幕SDK需要完整加载）")
 
         # 注入反检测 JS 到每个新页面
         await self._context.add_init_script(STEALTH_JS)
@@ -1203,58 +1202,29 @@ class DouyinLiveCrawler:
         parts.append(payload)
         return b''.join(parts)
 
-    async def start_danmaku_direct(
-        self,
-        room_id: str,
-        callback: Callable[[dict, str, str], None],
-        duration: int = 300,
-    ):
-        """
-        直连抖音 WebSocket 弹幕流（不依赖浏览器页面加载）。
-
-        通过 Python websockets 库直接连接抖音弹幕 WebSocket 端点，
-        绕过 Playwright 页面导航的 ERR_ABORTED 问题。
+    async def _sign_ws_url_with_playwright(self, web_rid: str, signing_page=None) -> str:
+        """Use Playwright to call byted_acrawler.frontierSign() for X-Bogus URL signing.
 
         Args:
-            room_id:  直播间 ID。
-            callback: 消息回调 callback(message_dict, room_id, platform)。
-            duration: 抓取持续时间（秒），默认 300。
+            web_rid: The web_rid (used as room_id in the URL).
+            signing_page: A Playwright page already loaded on douyin.com (directory page).
+
+        Returns:
+            Signed WebSocket URL string, or unsigned URL if signing fails.
         """
-        if not _HAS_WEBSOCKETS:
-            logger.error("websockets 库未安装，无法使用直连弹幕模式")
-            return
-        if not self._decode_websocket_frame or not self._build_ack_frame:
-            logger.error("弹幕解码器不可用，无法启动直连弹幕流")
-            return
+        if not signing_page:
+            logger.warning(f"[房间 {web_rid}] No signing page, using unsigned URL")
+            return ''
 
-        logger.info(f"[房间 {room_id}] 启动直连 WebSocket 弹幕流...")
-
-        # 1. 获取 ttwid（先从浏览器上下文，再从 HTTP）
-        browser_cookies = await self._async_get_browser_cookies()
-        ttwid = ''
-        if browser_cookies:
-            # 从浏览器 cookie 字符串中提取 ttwid
-            for part in browser_cookies.split(';'):
-                part = part.strip()
-                if part.startswith('ttwid='):
-                    ttwid = part.split('=', 1)[1]
-                    break
-        if not ttwid:
-            ttwid = self._get_ttwid_from_http(room_id)
-
-        if not ttwid:
-            logger.warning(f"[房间 {room_id}] 无法获取 ttwid Cookie，直连可能失败")
-
-        # 2. 构建 WebSocket URL
         ts = str(int(time.time() * 1000))
         cursor = f"t-{ts}_r-1_d-1_u-1_h-1"
         internal_ext = (
-            f"internal_src:dim|wss_push_room_id:{room_id}"
+            f"internal_src:dim|wss_push_room_id:{web_rid}"
             f"|wss_push_did:0|dim_log_id:{ts}"
             f"|fetch_time:{ts}|seq:1|wss_info:0-{ts}-0-0"
         )
 
-        params = urllib.parse.urlencode({
+        unsigned_params = urllib.parse.urlencode({
             'app_name': 'douyin_web',
             'version_code': '180800',
             'webcast_sdk_version': '1.0.14-beta.0',
@@ -1281,14 +1251,754 @@ class DouyinLiveCrawler:
             'user_unique_id': '',
             'im_path': '/webcast/im/fetch/',
             'identity': 'audience',
-            'room_id': room_id,
+            'room_id': web_rid,
             'heartbeatDuration': '0',
-            'signature': '00000000',
         })
 
-        ws_url = (
-            f"wss://webcast5-ws-web-lf.douyin.com/webcast/im/push/v2/?{params}"
+        unsigned_url = f"wss://webcast5-ws-web-lf.douyin.com/webcast/im/push/v2/?{unsigned_params}"
+
+        try:
+            # Verify signing page is still alive (lightweight check, no navigation)
+            _page_ok = False
+            try:
+                await signing_page.evaluate("1")
+                _page_ok = True
+            except Exception:
+                logger.warning(f"[房间 {web_rid}] Signing page context dead, using unsigned URL")
+
+            if not _page_ok:
+                logger.warning(f"[房间 {web_rid}] Signing page still not ready after refresh")
+                return unsigned_url
+
+            result = await signing_page.evaluate("""(url) => {
+                try {
+                    if (typeof window.byted_acrawler === 'undefined' ||
+                        typeof window.byted_acrawler.frontierSign !== 'function') {
+                        return { error: 'byted_acrawler.frontierSign not available',
+                                 has_ac: typeof window.byted_acrawler !== 'undefined' };
+                    }
+                    return window.byted_acrawler.frontierSign(url);
+                } catch(e) {
+                    return { error: e.message };
+                }
+            }""", unsigned_url)
+
+            if isinstance(result, str):
+                logger.info(f"[房间 {web_rid}] frontierSign returned signed URL string")
+                return result
+            elif isinstance(result, dict):
+                if 'error' in result:
+                    logger.warning(f"[房间 {web_rid}] frontierSign error: {result['error']}")
+                    return unsigned_url
+                x_bogus = result.get('X-Bogus', result.get('x-bogus', ''))
+                if x_bogus:
+                    signed_url = unsigned_url + '&X-Bogus=' + x_bogus
+                    logger.info(f"[房间 {web_rid}] URL signed: X-Bogus={x_bogus[:24]}...")
+                    return signed_url
+                # Check if result contains a full signed URL
+                _sign = result.get('signature', result.get('sign', ''))
+                if _sign:
+                    signed_url = unsigned_url + '&signature=' + _sign
+                    logger.info(f"[房间 {web_rid}] URL signed via signature param")
+                    return signed_url
+                logger.warning(f"[房间 {web_rid}] frontierSign returned dict but no X-Bogus/signature: {list(result.keys())}")
+                return unsigned_url
+            else:
+                logger.warning(f"[房间 {web_rid}] frontierSign unexpected result type: {type(result)}")
+                return unsigned_url
+        except Exception as e:
+            logger.warning(f"[房间 {web_rid}] frontierSign exception: {e}")
+            return unsigned_url
+
+    async def _resolve_internal_room_id(self, web_rid: str) -> str:
+        """Resolve the internal room_id from a web_rid using Douyin's web enter API.
+
+        The WebSocket danmaku endpoint requires the internal room_id, not the web_rid.
+        This method calls the /webcast/room/web/enter/ API to get the mapping.
+
+        Args:
+            web_rid: The web_rid from the room URL (e.g., '285574252923').
+
+        Returns:
+            The internal room_id string, or the original web_rid if resolution fails.
+        """
+        try:
+            # Get cookies for the API call
+            ttwid = ''
+            browser_cookies = await self._async_get_browser_cookies()
+            if browser_cookies:
+                for part in browser_cookies.split(';'):
+                    part = part.strip()
+                    if part.startswith('ttwid='):
+                        ttwid = part.split('=', 1)[1]
+                        break
+            if not ttwid:
+                ttwid = self._get_ttwid_from_http(web_rid)
+
+            cookie_header = f'ttwid={ttwid}' if ttwid else ''
+            if browser_cookies:
+                cookie_header = browser_cookies
+
+            url = (
+                f"https://live.douyin.com/webcast/room/web/enter/?"
+                f"aid=6383&app_name=douyin_web&live_id=1&device_platform=web"
+                f"&enter_from=web_live&web_rid={web_rid}"
+            )
+
+            req = urllib.request.Request(url, headers={
+                'User-Agent': REALISTIC_USER_AGENT,
+                'Cookie': cookie_header,
+                'Referer': 'https://live.douyin.com/',
+                'Accept': 'application/json, text/plain, */*',
+            })
+
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+
+            if data.get('status_code') == 0 or data.get('code') == 0:
+                room_data = data.get('data', {})
+                # data.data can be a list or a dict
+                if isinstance(room_data, list) and room_data:
+                    room_data = room_data[0]
+                if isinstance(room_data, dict):
+                    internal_id = str(room_data.get('id_str', '') or room_data.get('id', ''))
+                    room_name = room_data.get('title', '')
+                    owner = room_data.get('owner', {}) or {}
+                    anchor = owner.get('nickname', '')
+                    if internal_id and internal_id != web_rid:
+                        logger.info(f"[房间 {web_rid}] Resolved internal room_id: {internal_id}"
+                                    f" (title={room_name[:20]}, anchor={anchor})")
+                        return internal_id
+                    elif internal_id:
+                        logger.info(f"[房间 {web_rid}] internal_id same as web_rid: {internal_id}")
+                        return internal_id
+                    else:
+                        # Check nested structure
+                        room_info = room_data.get('room', {}) or room_data.get('room_info', {})
+                        internal_id = str(room_info.get('id_str', '') or room_info.get('id', ''))
+                        if internal_id:
+                            logger.info(f"[房间 {web_rid}] Resolved nested internal room_id: {internal_id}")
+                            return internal_id
+
+            logger.warning(f"[房间 {web_rid}] web enter API returned no room_id: status={data.get('status_code', '?')}")
+            return web_rid
+
+        except Exception as e:
+            logger.warning(f"[房间 {web_rid}] Failed to resolve internal room_id: {e}")
+            return web_rid
+
+    async def start_danmaku_bridge(
+        self,
+        room_id: str,
+        callback: Callable[[dict, str, str], None],
+        duration: int = 300,
+        signing_page=None,
+    ):
+        """
+        通过浏览器 JS 内的 WebSocket 连接接收弹幕，再桥接到 Python 回调。
+
+        在签名页（目录页）的 JavaScript 上下文中打开 WebSocket 连接，
+        利用浏览器自带的 Cookie / frontierSign 签名绕过所有反爬检测。
+        收到的二进制帧经 base64 编码传回 Python，由 protobuf 解码器解析。
+
+        Args:
+            room_id:      直播间 web_rid 或内部 room_id。
+            callback:     消息回调 callback(message_dict, room_id, platform)。
+            duration:     持续时间（秒）。
+            signing_page: 已加载抖音目录页的 Playwright Page。
+        """
+        if not signing_page:
+            raise RuntimeError("start_danmaku_bridge requires a signing_page")
+        if not self._decode_websocket_frame or not self._build_ack_frame:
+            raise RuntimeError("Protobuf decoder not available")
+
+        import base64 as _b64
+
+        logger.info(f"[房间 {room_id}] 启动浏览器桥接弹幕流...")
+
+        # ── Phase 1: 在浏览器 JS 中打开 WebSocket ──
+        ts = str(int(time.time() * 1000))
+        cursor = f"t-{ts}_r-1_d-1_u-1_h-1"
+        internal_ext = (
+            f"internal_src:dim|wss_push_room_id:{room_id}"
+            f"|wss_push_did:0|dim_log_id:{ts}"
+            f"|fetch_time:{ts}|seq:1|wss_info:0-{ts}-0-0"
         )
+
+        setup_result = await signing_page.evaluate("""async ([roomId, cursor, iext]) => {
+            try {
+                if (!window.__dmBridges) window.__dmBridges = {};
+
+                const params = new URLSearchParams({
+                    app_name: 'douyin_web',
+                    version_code: '180800',
+                    webcast_sdk_version: '1.0.14-beta.0',
+                    update_version_code: '1.0.14-beta.0',
+                    compress: 'gzip',
+                    device_platform: 'web',
+                    cookie_enabled: 'true',
+                    screen_width: '1920',
+                    screen_height: '1080',
+                    browser_language: 'zh-CN',
+                    browser_platform: 'Win32',
+                    browser_name: 'Mozilla',
+                    browser_version: '5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    browser_online: 'true',
+                    tz_name: 'Asia/Shanghai',
+                    cursor: cursor,
+                    internal_ext: iext,
+                    host: 'https://live.douyin.com',
+                    aid: '6383',
+                    live_id: '1',
+                    did_rule: '3',
+                    endpoint: 'live_pc',
+                    support_wrds: '1',
+                    user_unique_id: '',
+                    im_path: '/webcast/im/fetch/',
+                    identity: 'audience',
+                    room_id: roomId,
+                    heartbeatDuration: '0',
+                });
+
+                const unsignedUrl = 'wss://webcast5-ws-web-lf.douyin.com/webcast/im/push/v2/?' + params.toString();
+
+                // Sign with frontierSign (AWAIT the Promise!)
+                let signedUrl = unsignedUrl;
+                let sigMethod = 'none';
+                try {
+                    if (typeof window.byted_acrawler !== 'undefined' &&
+                        typeof window.byted_acrawler.frontierSign === 'function') {
+                        sigMethod = 'frontierSign';
+                        const signResult = await window.byted_acrawler.frontierSign(unsignedUrl);
+                        if (typeof signResult === 'string') {
+                            signedUrl = signResult;
+                            sigMethod = 'frontierSign:string';
+                        } else if (signResult && signResult['X-Bogus']) {
+                            signedUrl = unsignedUrl + '&X-Bogus=' + signResult['X-Bogus'];
+                            sigMethod = 'frontierSign:X-Bogus';
+                        } else if (signResult && signResult.signature) {
+                            signedUrl = unsignedUrl + '&signature=' + signResult.signature;
+                            sigMethod = 'frontierSign:signature';
+                        } else {
+                            sigMethod = 'frontierSign:unknown_result(' + JSON.stringify(signResult).substring(0,80) + ')';
+                        }
+                    }
+                } catch(e) { sigMethod = 'frontierSign_error:' + e.message; }
+
+                // Create bridge state
+                const bridge = {
+                    messages: [],
+                    connected: false,
+                    error: null,
+                    closed: false,
+                    count: 0,
+                    ws: null,
+                    sigMethod: sigMethod,
+                };
+
+                bridge.ws = new WebSocket(signedUrl);
+                bridge.ws.binaryType = 'arraybuffer';
+
+                bridge.ws.onopen = () => { bridge.connected = true; };
+                bridge.ws.onmessage = (e) => {
+                    if (e.data instanceof ArrayBuffer) {
+                        const bytes = new Uint8Array(e.data);
+                        let binary = '';
+                        for (let i = 0; i < bytes.byteLength; i++) {
+                            binary += String.fromCharCode(bytes[i]);
+                        }
+                        bridge.messages.push(btoa(binary));
+                        bridge.count++;
+                    }
+                };
+                bridge.ws.onerror = (e) => {
+                    bridge.error = 'ws_error';
+                    bridge.readyState = bridge.ws.readyState;
+                    bridge.urlLen = signedUrl.length;
+                    try { bridge.errorDetail = JSON.stringify({type: e.type, rs: bridge.ws.readyState}); } catch(ex) {}
+                };
+                bridge.ws.onclose = (e) => {
+                    bridge.closed = true;
+                    bridge.closeCode = e.code;
+                    bridge.closeReason = e.reason || '';
+                    bridge.wasClean = e.wasClean;
+                };
+
+                // Heartbeat every 10s
+                bridge.hbInterval = setInterval(() => {
+                    if (bridge.ws.readyState === WebSocket.OPEN) {
+                        const hb = new Uint8Array([50, 2, 104, 98, 66, 1, 0]);
+                        bridge.ws.send(hb.buffer);
+                    }
+                }, 10000);
+
+                window.__dmBridges[roomId] = bridge;
+                return { ok: true, sigMethod: sigMethod, url: signedUrl.substring(0, 120) };
+            } catch(e) {
+                return { ok: false, error: e.message };
+            }
+        }""", [room_id, cursor, internal_ext])
+
+        if not setup_result.get('ok'):
+            raise RuntimeError(f"JS WebSocket setup failed: {setup_result.get('error')}")
+
+        _sig = setup_result.get('sigMethod', '?')
+        logger.info(f"[房间 {room_id}] JS WebSocket opening... sig={_sig}")
+
+        # ── Phase 2: Poll messages from JS and decode in Python ──
+        message_count = 0
+        start_time = time.time()
+        _empty_polls = 0
+        _last_ack_iext = ''
+
+        try:
+            while time.time() - start_time < duration:
+                await asyncio.sleep(2)
+
+                # Check if signing page is still alive
+                try:
+                    _alive = await signing_page.evaluate(f"""() => {{
+                        const b = window.__dmBridges && window.__dmBridges['{room_id}'];
+                        if (!b) return {{ alive: false, reason: 'no_bridge' }};
+                        return {{
+                            alive: true,
+                            connected: b.connected,
+                            closed: b.closed,
+                            error: b.error,
+                            count: b.count,
+                            pending: b.messages.length,
+                            closeCode: b.closeCode || 0,
+                            readyState: b.ws ? b.ws.readyState : -1,
+                        }};
+                    }}""")
+                except Exception as poll_err:
+                    logger.warning(f"[房间 {room_id}] Bridge poll error: {poll_err}")
+                    break
+
+                if not _alive.get('alive'):
+                    logger.warning(f"[房间 {room_id}] Bridge not alive: {_alive}")
+                    break
+
+                if _alive.get('error'):
+                    # Wait briefly for onclose to fire after onerror
+                    await asyncio.sleep(1)
+                    _close_info = await signing_page.evaluate(f"""() => {{
+                        const b = window.__dmBridges && window.__dmBridges['{room_id}'];
+                        if (!b) return {{}};
+                        return {{
+                            closed: b.closed,
+                            closeCode: b.closeCode || 0,
+                            closeReason: b.closeReason || '',
+                            readyState: b.ws ? b.ws.readyState : -1,
+                            urlLen: b.urlLen || 0,
+                        }};
+                    }}""")
+                    _cc = _close_info.get('closeCode', 0)
+                    _rs = _close_info.get('readyState', -1)
+                    logger.warning(f"[房间 {room_id}] Bridge WS error: {_alive['error']}, "
+                                   f"closeCode={_cc}, readyState={_rs}, urlLen={_close_info.get('urlLen', 0)}")
+                    break
+
+                if _alive.get('closed'):
+                    _code = _alive.get('closeCode', 0)
+                    logger.info(f"[房间 {room_id}] JS WebSocket closed (code={_code})")
+                    break
+
+                _pending = _alive.get('pending', 0)
+                if _pending == 0:
+                    _empty_polls += 1
+                    # If no messages for 60s and never connected, the room might be ended
+                    if _empty_polls > 30 and not _alive.get('connected'):
+                        logger.info(f"[房间 {room_id}] Never connected after {_empty_polls*2}s, giving up")
+                        break
+                    continue
+
+                _empty_polls = 0
+
+                # Fetch and process messages
+                raw_messages = await signing_page.evaluate(f"""() => {{
+                    const b = window.__dmBridges && window.__dmBridges['{room_id}'];
+                    if (!b || b.messages.length === 0) return [];
+                    const batch = b.messages.splice(0, 50);
+                    return batch;
+                }}""")
+
+                for b64_data in (raw_messages or []):
+                    try:
+                        raw_bytes = _b64.b64decode(b64_data)
+                        _, messages, _, need_ack, iext = self._decode_websocket_frame(raw_bytes)
+                        for msg in messages:
+                            try:
+                                if asyncio.iscoroutinefunction(callback):
+                                    await callback(msg, room_id, "douyin")
+                                else:
+                                    callback(msg, room_id, "douyin")
+                                message_count += 1
+                            except Exception as cb_err:
+                                logger.debug(f"[房间 {room_id}] Callback error: {cb_err}")
+
+                        # Send ACK via JS WebSocket if needed
+                        if need_ack and iext and iext != _last_ack_iext:
+                            _last_ack_iext = iext
+                            try:
+                                await signing_page.evaluate(f"""(ackStr) => {{
+                                    const b = window.__dmBridges && window.__dmBridges['{room_id}'];
+                                    if (b && b.ws && b.ws.readyState === 1) {{
+                                        // Decode base64 ack frame to ArrayBuffer
+                                        const raw = atob(ackStr);
+                                        const bytes = new Uint8Array(raw.length);
+                                        for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+                                        b.ws.send(bytes.buffer);
+                                    }}
+                                }}""", _b64.b64encode(self._build_ack_frame(iext)).decode('ascii'))
+                            except Exception as ack_err:
+                                logger.debug(f"[房间 {room_id}] ACK send error: {ack_err}")
+                    except Exception as dec_err:
+                        logger.debug(f"[房间 {room_id}] Frame decode error: {dec_err}")
+
+        except Exception as e:
+            logger.error(f"[房间 {room_id}] Bridge error: {e}")
+        finally:
+            # ── Phase 3: Cleanup ──
+            try:
+                await signing_page.evaluate(f"""() => {{
+                    const b = window.__dmBridges && window.__dmBridges['{room_id}'];
+                    if (b) {{
+                        clearInterval(b.hbInterval);
+                        if (b.ws) try {{ b.ws.close(); }} catch(e) {{}}
+                        delete window.__dmBridges['{room_id}'];
+                    }}
+                }}""")
+            except Exception:
+                pass
+            elapsed = time.time() - start_time
+            logger.info(
+                f"[房间 {room_id}] 桥接弹幕流结束：{elapsed:.1f} 秒，共 {message_count} 条消息"
+            )
+            if message_count == 0:
+                raise RuntimeError(f"Bridge received 0 messages in {elapsed:.1f}s (ws_error)")
+
+    async def start_danmaku_http_poll(
+        self,
+        room_id: str,
+        callback: Callable[[dict, str, str], None],
+        duration: int = 300,
+        signing_page=None,
+    ):
+        """
+        通过浏览器 JS fetch 轮询 HTTP 弹幕接口接收弹幕。
+
+        作为 WebSocket 方案的备用方案。使用 frontierSign 签名 HTTP URL，
+        通过 /webcast/im/fetch/ 端点获取 protobuf 弹幕数据，在 Python 端解码。
+
+        Args:
+            room_id:      直播间 ID。
+            callback:     消息回调 callback(message_dict, room_id, platform)。
+            duration:     持续时间（秒）。
+            signing_page: 已加载抖音目录页的 Playwright Page。
+        """
+        if not signing_page:
+            raise RuntimeError("start_danmaku_http_poll requires a signing_page")
+        if not self._decode_websocket_frame or not self._build_ack_frame:
+            raise RuntimeError("Protobuf decoder not available")
+
+        import base64 as _b64
+
+        logger.info(f"[房间 {room_id}] 启动 HTTP fetch 轮询弹幕流...")
+
+        message_count = 0
+        start_time = time.time()
+        cursor = f"t-{int(time.time()*1000)}_r-1_d-1_u-1_h-1"
+        internal_ext = (
+            f"internal_src:dim|wss_push_room_id:{room_id}"
+            f"|wss_push_did:0|dim_log_id:{int(time.time()*1000)}"
+            f"|fetch_time:{int(time.time()*1000)}|seq:1|wss_info:0-{int(time.time()*1000)}-0-0"
+        )
+        _empty_count = 0
+        _poll_interval = 3  # seconds between polls
+
+        try:
+            while time.time() - start_time < duration:
+                # Lightweight page health check (no navigation - just detect dead context)
+                try:
+                    await signing_page.evaluate("1")
+                except Exception as page_err:
+                    err_msg = str(page_err)
+                    if 'destroyed' in err_msg or 'closed' in err_msg:
+                        logger.warning(f"[房间 {room_id}] Signing page context dead, stopping HTTP poll")
+                        break
+                    # Other errors (e.g., timeout) - just continue and try the fetch
+
+                # Make signed HTTP fetch from browser JS (with timeout to prevent hanging)
+                try:
+                    fetch_result = await asyncio.wait_for(signing_page.evaluate("""async ([roomId, cursor, iext]) => {
+                    try {
+                        const params = new URLSearchParams({
+                            app_name: 'douyin_web',
+                            version_code: '180800',
+                            webcast_sdk_version: '1.0.14-beta.0',
+                            update_version_code: '1.0.14-beta.0',
+                            compress: 'gzip',
+                            device_platform: 'web',
+                            cookie_enabled: 'true',
+                            screen_width: '1920',
+                            screen_height: '1080',
+                            browser_language: 'zh-CN',
+                            browser_platform: 'Win32',
+                            browser_name: 'Mozilla',
+                            browser_version: '5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                            browser_online: 'true',
+                            tz_name: 'Asia/Shanghai',
+                            cursor: cursor,
+                            internal_ext: iext,
+                            host: 'https://live.douyin.com',
+                            aid: '6383',
+                            live_id: '1',
+                            did_rule: '3',
+                            endpoint: 'live_pc',
+                            support_wrds: '1',
+                            user_unique_id: '',
+                            im_path: '/webcast/im/fetch/',
+                            identity: 'audience',
+                            room_id: roomId,
+                            heartbeatDuration: '0',
+                        });
+
+                        let url = 'https://live.douyin.com/webcast/im/fetch/?' + params.toString();
+
+                        // Sign with frontierSign
+                        let sigMethod = 'none';
+                        try {
+                            if (typeof window.byted_acrawler !== 'undefined' &&
+                                typeof window.byted_acrawler.frontierSign === 'function') {
+                                const signResult = await window.byted_acrawler.frontierSign(url);
+                                if (typeof signResult === 'string') {
+                                    url = signResult;
+                                    sigMethod = 'string';
+                                } else if (signResult && signResult['X-Bogus']) {
+                                    url = url + '&X-Bogus=' + signResult['X-Bogus'];
+                                    sigMethod = 'X-Bogus';
+                                }
+                            }
+                        } catch(e) { sigMethod = 'error:' + e.message; }
+
+                        const controller = new AbortController();
+                        const fetchTimeout = setTimeout(() => controller.abort(), 10000);
+                        let resp;
+                        try {
+                            resp = await fetch(url, { credentials: 'include', signal: controller.signal });
+                        } finally {
+                            clearTimeout(fetchTimeout);
+                        }
+                        const status = resp.status;
+                        const contentType = resp.headers.get('content-type') || '';
+                        const contentLen = resp.headers.get('content-length') || '';
+
+                        if (!resp.ok) {
+                            return { error: 'HTTP ' + status, sigMethod, contentType };
+                        }
+
+                        // Read response as ArrayBuffer -> base64
+                        const buf = await resp.arrayBuffer();
+                        const bytes = new Uint8Array(buf);
+                        let binary = '';
+                        for (let i = 0; i < bytes.byteLength; i++) {
+                            binary += String.fromCharCode(bytes[i]);
+                        }
+                        return {
+                            ok: true,
+                            data: btoa(binary),
+                            size: buf.byteLength,
+                            sigMethod,
+                            contentType,
+                            contentLen,
+                            firstBytes: Array.from(bytes.slice(0, 8)),
+                        };
+                    } catch(e) {
+                        return { error: e.message };
+                    }
+                }""", [room_id, cursor, internal_ext]), timeout=15)
+                except asyncio.TimeoutError:
+                    logger.warning(f"[房间 {room_id}] HTTP fetch evaluate timed out after 15s")
+                    fetch_result = {'error': 'evaluate_timeout'}
+                except Exception as eval_err:
+                    logger.warning(f"[房间 {room_id}] HTTP fetch evaluate error: {eval_err}")
+                    fetch_result = {'error': str(eval_err)[:80]}
+
+                if not fetch_result:
+                    logger.warning(f"[房间 {room_id}] HTTP fetch returned null")
+                    await asyncio.sleep(_poll_interval)
+                    continue
+
+                if fetch_result.get('error'):
+                    _err = fetch_result['error']
+                    logger.warning(f"[房间 {room_id}] HTTP fetch error: {_err} (sig={fetch_result.get('sigMethod', '?')})")
+                    _empty_count += 1
+                    if _empty_count > 10:
+                        logger.info(f"[房间 {room_id}] Too many fetch errors, stopping")
+                        break
+                    await asyncio.sleep(_poll_interval)
+                    continue
+
+                if not fetch_result.get('ok'):
+                    await asyncio.sleep(_poll_interval)
+                    continue
+
+                _size = fetch_result.get('size', 0)
+                _sig = fetch_result.get('sigMethod', '?')
+                _ct = fetch_result.get('contentType', '')
+
+                if _size == 0:
+                    _empty_count += 1
+                    if _empty_count > 20:
+                        logger.info(f"[房间 {room_id}] 20 consecutive empty responses, stopping")
+                        break
+                    await asyncio.sleep(_poll_interval)
+                    continue
+
+                _empty_count = 0
+
+                # Decode protobuf response
+                try:
+                    raw_bytes = _b64.b64decode(fetch_result['data'])
+
+                    # Try decoding as WebSocket frame format (same protobuf structure)
+                    _, messages, new_cursor, need_ack, new_iext = self._decode_websocket_frame(raw_bytes)
+
+                    if new_cursor:
+                        cursor = new_cursor
+                    if new_iext:
+                        internal_ext = new_iext
+
+                    for msg in messages:
+                        try:
+                            if asyncio.iscoroutinefunction(callback):
+                                await callback(msg, room_id, "douyin")
+                            else:
+                                callback(msg, room_id, "douyin")
+                            message_count += 1
+                        except Exception as cb_err:
+                            logger.debug(f"[房间 {room_id}] Callback error: {cb_err}")
+
+                    if message_count > 0 and message_count % 20 == 0:
+                        logger.info(f"[房间 {room_id}] HTTP poll: {message_count} messages so far")
+
+                except Exception as dec_err:
+                    logger.debug(f"[房间 {room_id}] Protobuf decode error: {dec_err} (size={_size}, sig={_sig}, ct={_ct})")
+
+                await asyncio.sleep(_poll_interval)
+
+        except Exception as e:
+            logger.error(f"[房间 {room_id}] HTTP poll error: {e}")
+        finally:
+            elapsed = time.time() - start_time
+            logger.info(
+                f"[房间 {room_id}] HTTP 轮询弹幕流结束：{elapsed:.1f} 秒，"
+                f"共 {message_count} 条消息"
+            )
+            if message_count == 0:
+                raise RuntimeError(f"HTTP poll received 0 messages in {elapsed:.1f}s")
+
+    async def start_danmaku_direct(
+        self,
+        room_id: str,
+        callback: Callable[[dict, str, str], None],
+        duration: int = 300,
+        signing_page=None,
+    ):
+        """
+        直连抖音 WebSocket 弹幕流（不依赖浏览器页面加载）。
+
+        通过 Python websockets 库直接连接抖音弹幕 WebSocket 端点，
+        绕过 Playwright 页面导航的 ERR_ABORTED 问题。
+
+        Args:
+            room_id:      直播间 ID。
+            callback:     消息回调 callback(message_dict, room_id, platform)。
+            duration:     抓取持续时间（秒），默认 300。
+            signing_page: Playwright page loaded on douyin.com for frontierSign URL signing.
+        """
+        if not _HAS_WEBSOCKETS:
+            logger.error("websockets 库未安装，无法使用直连弹幕模式")
+            return
+        if not self._decode_websocket_frame or not self._build_ack_frame:
+            logger.error("弹幕解码器不可用，无法启动直连弹幕流")
+            return
+
+        logger.info(f"[房间 {room_id}] 启动直连 WebSocket 弹幕流...")
+
+        # 1. 获取 ttwid（先从浏览器上下文，再从 HTTP）
+        browser_cookies = await self._async_get_browser_cookies()
+        ttwid = ''
+        if browser_cookies:
+            # 从浏览器 cookie 字符串中提取 ttwid
+            for part in browser_cookies.split(';'):
+                part = part.strip()
+                if part.startswith('ttwid='):
+                    ttwid = part.split('=', 1)[1]
+                    break
+        if not ttwid:
+            ttwid = self._get_ttwid_from_http(room_id)
+
+        if not ttwid:
+            logger.warning(f"[房间 {room_id}] 无法获取 ttwid Cookie，直连可能失败")
+
+        # 1.5 Resolve internal room_id from web_rid
+        # WebSocket endpoint needs the internal room_id, not the URL web_rid
+        internal_room_id = await self._resolve_internal_room_id(room_id)
+        if internal_room_id != room_id:
+            logger.info(f"[房间 {room_id}] Using internal room_id: {internal_room_id}")
+
+        # 2. 构建 WebSocket URL (with frontierSign signing via Playwright)
+        ws_url = ''
+        if signing_page:
+            ws_url = await self._sign_ws_url_with_playwright(internal_room_id, signing_page)
+            if ws_url:
+                logger.info(f"[房间 {internal_room_id}] Got signed WebSocket URL")
+            else:
+                logger.warning(f"[房间 {internal_room_id}] Signing returned empty, building unsigned URL")
+
+        if not ws_url:
+            # Fallback: unsigned URL (no signature — will likely be rejected by Douyin)
+            ts = str(int(time.time() * 1000))
+            cursor = f"t-{ts}_r-1_d-1_u-1_h-1"
+            internal_ext = (
+                f"internal_src:dim|wss_push_room_id:{internal_room_id}"
+                f"|wss_push_did:0|dim_log_id:{ts}"
+                f"|fetch_time:{ts}|seq:1|wss_info:0-{ts}-0-0"
+            )
+            params = urllib.parse.urlencode({
+                'app_name': 'douyin_web',
+                'version_code': '180800',
+                'webcast_sdk_version': '1.0.14-beta.0',
+                'update_version_code': '1.0.14-beta.0',
+                'compress': 'gzip',
+                'device_platform': 'web',
+                'cookie_enabled': 'true',
+                'screen_width': '1920',
+                'screen_height': '1080',
+                'browser_language': 'zh-CN',
+                'browser_platform': 'Win32',
+                'browser_name': 'Mozilla',
+                'browser_version': '5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'browser_online': 'true',
+                'tz_name': 'Asia/Shanghai',
+                'cursor': cursor,
+                'internal_ext': internal_ext,
+                'host': 'https://live.douyin.com',
+                'aid': '6383',
+                'live_id': '1',
+                'did_rule': '3',
+                'endpoint': 'live_pc',
+                'support_wrds': '1',
+                'user_unique_id': '',
+                'im_path': '/webcast/im/fetch/',
+                'identity': 'audience',
+                'room_id': internal_room_id,
+                'heartbeatDuration': '0',
+            })
+            ws_url = f"wss://webcast5-ws-web-lf.douyin.com/webcast/im/push/v2/?{params}"
+            logger.warning(f"[房间 {internal_room_id}] Using UNSIGNED URL (no frontierSign)")
 
         cookie_header = f'ttwid={ttwid}' if ttwid else ''
         # 附加其他浏览器 cookie（如 sessionid 等）
@@ -1299,6 +2009,7 @@ class DouyinLiveCrawler:
             'Cookie': cookie_header,
             'User-Agent': REALISTIC_USER_AGENT,
             'Origin': 'https://live.douyin.com',
+            'Referer': 'https://live.douyin.com/',
         }
 
         message_count = 0
@@ -1372,12 +2083,19 @@ class DouyinLiveCrawler:
                             )
 
         except websockets.InvalidStatusCode as ise:
+            _extra = ''
+            try:
+                if hasattr(ise, 'response') and ise.response:
+                    _extra = f" headers={dict(ise.response.headers)}"[:200]
+            except Exception:
+                pass
             logger.error(
-                f"[房间 {room_id}] WS 连接被拒绝 (HTTP {ise.status_code})"
+                f"[房间 {room_id}→{internal_room_id}] WS rejected (HTTP {ise.status_code}){_extra}"
             )
         except Exception as e:
+            err_str = str(e)
             logger.error(
-                f"[房间 {room_id}] 直连 WebSocket 异常: {e}"
+                f"[房间 {room_id}→{internal_room_id}] 直连 WebSocket 异常: {err_str[:120]}"
             )
         finally:
             if heartbeat_task:
@@ -1446,12 +2164,11 @@ class DouyinLiveCrawler:
                 _os.makedirs(_profile_dir, exist_ok=True)
                 danmaku_context = await self._playwright.chromium.launch_persistent_context(
                     _profile_dir,
-                    headless=True,
+                    headless=False,
                     channel='chrome',
                     args=[
                         '--disable-blink-features=AutomationControlled',
                         '--no-sandbox',
-                        '--headless=new',
                         '--disk-cache-size=1',
                         '--disable-background-networking',
                     ],
@@ -1484,10 +2201,14 @@ class DouyinLiveCrawler:
             """构造 CDP 事件处理器（闭包捕获统计变量）"""
 
             def on_ws_created(params):
-                url = params.get("url", "")
-                if "webcast" not in url and "im/push" not in url:
-                    return
+                # CDP webSocketCreated: URL is nested in params.request.url
+                req = params.get("request", {}) or {}
+                url = req.get("url", "") or params.get("url", "")
                 ws_id = params.get("requestId", "")
+                # Accept webcast/im/push URLs, or any WS on live.douyin.com pages
+                if url and ("webcast" not in url and "im/push" not in url
+                            and "douyin" not in url):
+                    return
                 ws_ids.add(ws_id)
                 logger.info(
                     f"[房间 {room_id}] [CDP] 检测到原生 WebSocket: "
@@ -1611,6 +2332,17 @@ class DouyinLiveCrawler:
             except Exception:
                 pass
 
+        # ── 移除所有资源阻断规则 ──
+        # 弹幕SDK需要完整加载所有资源（包括图片/CSS）才能正确计算WS签名。
+        # 之前尝试轻量阻断导致WS连接1006被关闭。
+        _ctx_for_route = danmaku_context or self._context
+        if _ctx_for_route:
+            try:
+                await _ctx_for_route.unroute('**/*')
+                logger.info(f"[房间 {room_id}] 已移除所有资源阻断规则（允许完整加载）")
+            except Exception:
+                pass
+
         # ── 导航到直播间 ──
         try:
             logger.info(
@@ -1625,6 +2357,14 @@ class DouyinLiveCrawler:
                 logger.info(
                     f"[房间 {room_id}] 页面导航成功（domcontentloaded）"
                 )
+                # 捕获页面JS错误和关键console消息，帮助诊断WS连接问题
+                _js_errors = []
+                monitor_page.on("pageerror", lambda err: _js_errors.append(str(err)[:200]))
+                async def _on_console(msg):
+                    text = msg.text
+                    if any(kw in text.lower() for kw in ['websocket', 'ws error', 'signature', 'failed', 'blocked', 'refused', '403', '1006']):
+                        logger.info(f"[房间 {room_id}] [Console] {text[:150]}")
+                monitor_page.on("console", _on_console)
             except Exception as nav_err:
                 err_msg = str(nav_err)
                 if "ERR_ABORTED" in err_msg or "net::" in err_msg:
@@ -1645,14 +2385,13 @@ class DouyinLiveCrawler:
             except Exception:
                 pass
 
-            # ── 阶段 A：等待原生 WS（最多 90 秒） ──
-            # 抖音页面在反爬检测通过后会自行建立 WebSocket，
-            # CDP 会在网络层被动捕获所有帧，对页面完全透明。
+            # ── 阶段 A：等待原生 WS（最多 60 秒） ──
+            # 非无头模式下抖音页面通常在 10-40 秒内建立 WebSocket
             logger.info(
-                f"[房间 {room_id}] 等待页面原生 WebSocket 建立（最多 90 秒）..."
+                f"[房间 {room_id}] 等待页面原生 WebSocket 建立（最多 60 秒）..."
             )
             native_established = False
-            for tick in range(18):  # 18 * 5s = 90s
+            for tick in range(12):  # 12 * 5s = 60s
                 await asyncio.sleep(5)
                 if ws_ids:
                     native_established = True
@@ -1666,313 +2405,25 @@ class DouyinLiveCrawler:
                         f"[房间 {room_id}] 等待原生 WS... {(tick+1)*5}s"
                     )
 
-            # ── 阶段 B：若原生 WS 未建立，注入 JS WebSocket（带完整签名） ──
+            # ── 阶段 B：已禁用 ──
+            # 不再注入 JS WebSocket。实测发现：
+            # 1) 页面原生 WS 通常在 30-90 秒后建立（VM 较慢）
+            # 2) 注入的 WS 与原生 WS 冲突，导致原生 WS 被关闭
+            # 3) DEVICE_BLOCKED 使注入的 WS 始终失败
+            # CDP 被动截帧会在主循环中自动捕获原生 WS（无论何时建立）
             if not native_established:
                 logger.info(
-                    f"[房间 {room_id}] 原生 WS 未建立，注入带完整签名的 JS WebSocket..."
+                    f"[房间 {room_id}] 原生 WS 尚未建立，跳过注入，"
+                    f"CDP 将在主循环中持续监听..."
                 )
-                # 提取 user_unique_id
-                user_unique_id = ""
-                try:
-                    _cookies = await self._context.cookies()
-                    for c in _cookies:
-                        if c["name"] == "web_session_sig" or c["name"] == "sid_guard":
-                            user_unique_id = c.get("value", "")[:20]
-                            break
-                except Exception:
-                    pass
 
-                try:
-                    js_inject_result = await monitor_page.evaluate(f"""
-                        async () => {{
-                            if (window.__wsConnected) return {{ status: 'already_connected' }};
-                            window.__wsConnected = true;
-                            window.__wsMessages = [];
-                            window.__wsStatus = 'init';
-
-                            const roomId = '{room_id}';
-                            const ts = Date.now().toString();
-                            const userUniqueId = '{user_unique_id}';
-
-                            // 1) 先用 frontierSign 对完整 URL 签名
-                            let signedUrl = '';
-                            let sigSource = 'none';
-                            const baseUrl = 'wss://webcast5-ws-web-lf.douyin.com/webcast/im/push/v2/';
-                            const baseParams = {{
-                                'app_name': 'douyin_web',
-                                'version_code': '180800',
-                                'webcast_sdk_version': '1.0.14-beta.0',
-                                'update_version_code': '1.0.14-beta.0',
-                                'compress': 'gzip',
-                                'device_platform': 'web',
-                                'cookie_enabled': 'true',
-                                'screen_width': '1920',
-                                'screen_height': '1080',
-                                'browser_language': navigator.language || 'zh-CN',
-                                'browser_platform': 'Win32',
-                                'browser_name': 'Mozilla',
-                                'browser_version': navigator.userAgent,
-                                'browser_online': 'true',
-                                'tz_name': 'Asia/Shanghai',
-                                'cursor': 't-' + ts + '_r-1_d-1_u-1_h-1',
-                                'internal_ext':
-                                    'internal_src:dim|wss_push_room_id:' + roomId +
-                                    '|wss_push_did:0|dim_log_id:' + ts +
-                                    '|fetch_time:' + ts + '|seq:1|wss_info:0-' + ts + '-0-0',
-                                'host': 'https://live.douyin.com',
-                                'aid': '6383',
-                                'live_id': '1',
-                                'did_rule': '3',
-                                'endpoint': 'live_pc',
-                                'support_wrds': '1',
-                                'user_unique_id': userUniqueId,
-                                'im_path': '/webcast/im/fetch/',
-                                'identity': 'audience',
-                                'room_id': roomId,
-                                'heartbeatDuration': '0',
-                                'signature': '00000000',
-                            }};
-                            const qs = new URLSearchParams(baseParams).toString();
-                            const unsignedUrl = baseUrl + '?' + qs;
-
-                            try {{
-                                if (window.byted_acrawler && window.byted_acrawler.frontierSign) {{
-                                    sigSource = 'frontierSign';
-                                    const signResult = await window.byted_acrawler.frontierSign(unsignedUrl);
-                                    if (typeof signResult === 'string') {{
-                                        signedUrl = signResult;
-                                    }} else if (signResult && signResult['X-Bogus']) {{
-                                        signedUrl = unsignedUrl.replace(
-                                            'signature=00000000',
-                                            'signature=' + signResult['X-Bogus']
-                                        );
-                                    }} else {{
-                                        signedUrl = unsignedUrl;
-                                    }}
-                                }} else {{
-                                    signedUrl = unsignedUrl;
-                                }}
-                            }} catch(e) {{
-                                sigSource = 'error:' + e.message;
-                                signedUrl = unsignedUrl;
-                            }}
-
-                            // 2) 建立 WebSocket（浏览器原生 TLS 指纹）
-                            try {{
-                                const ws = new WebSocket(signedUrl);
-                                ws.binaryType = 'arraybuffer';
-                                window.__ws = ws;
-                                window.__wsStatus = 'connecting';
-
-                                ws.onopen = () => {{
-                                    window.__wsStatus = 'connected';
-                                    // 立即发送心跳
-                                    ws.send(new Uint8Array([0x32,0x02,0x68,0x62,0x42,0x01,0x00]));
-                                    window.__wsHeartbeat = setInterval(() => {{
-                                        if (ws.readyState === WebSocket.OPEN) {{
-                                            ws.send(new Uint8Array([0x32,0x02,0x68,0x62,0x42,0x01,0x00]));
-                                        }}
-                                    }}, 10000);
-                                }};
-                                ws.onmessage = (event) => {{
-                                    if (event.data instanceof ArrayBuffer) {{
-                                        const bytes = new Uint8Array(event.data);
-                                        let bin = '';
-                                        for (let i = 0; i < bytes.length; i++)
-                                            bin += String.fromCharCode(bytes[i]);
-                                        window.__wsMessages.push(btoa(bin));
-                                        if (window.__wsMessages.length > 500)
-                                            window.__wsMessages = window.__wsMessages.slice(-500);
-                                    }}
-                                }};
-                                ws.onclose = (e) => {{
-                                    window.__wsStatus = 'closed:' + e.code + ':' + e.reason;
-                                    clearInterval(window.__wsHeartbeat);
-                                }};
-                                ws.onerror = () => {{
-                                    window.__wsStatus = 'error';
-                                }};
-                                return {{
-                                    sigSource: sigSource,
-                                    url: signedUrl.substring(0, 100),
-                                    status: 'injected',
-                                }};
-                            }} catch(e) {{
-                                window.__wsStatus = 'failed:' + e.message;
-                                return {{ error: e.message }};
-                            }}
-                        }}
-                    """)
-                    logger.info(
-                        f"[房间 {room_id}] JS WS 注入结果: {js_inject_result}"
-                    )
-                except Exception as js_err:
-                    logger.warning(f"[房间 {room_id}] JS 注入失败: {js_err}")
-
-                # 等待 JS WS 连接（最多 30 秒）
-                for tick in range(6):
-                    await asyncio.sleep(5)
-                    try:
-                        status = await monitor_page.evaluate(
-                            "() => window.__wsStatus || 'unknown'"
-                        )
-                        if status == "connected":
-                            logger.info(
-                                f"[房间 {room_id}] JS WebSocket 已连接"
-                            )
-                            break
-                        elif status.startswith("closed") or status.startswith("failed"):
-                            logger.warning(
-                                f"[房间 {room_id}] JS WS 状态: {status}"
-                            )
-                            break
-                    except Exception:
-                        pass
-
-            # ── 阶段 B2：HTTP fetch 轮询兜底（当 WS 关闭时启用） ──
-            # 抖音的 /webcast/im/fetch/ 端点返回最近消息批次，
-            # 用 frontierSign 签名，HTTP POST 比 WS upgrade 更难被反爬。
+            # ── HTTP fetch 兜底变量初始化 ──
             _fetch_fallback_active = False
             _fetch_cursor = ""
             _fetch_seen_msg_ids = set()
 
             async def _do_one_fetch():
-                """执行一次 HTTP fetch 获取弹幕批次"""
-                nonlocal _fetch_cursor
-                try:
-                    fetch_result = await monitor_page.evaluate(f"""
-                        async () => {{
-                            const roomId = '{room_id}';
-                            const ts = Date.now().toString();
-                            const cursor = '{_fetch_cursor}' || ('t-' + ts + '_r-1_d-1_u-1_h-1');
-                            const baseUrl = 'https://webcast5-ws-web-lf.douyin.com/webcast/im/fetch/';
-                            const params = new URLSearchParams({{
-                                'app_name': 'douyin_web',
-                                'version_code': '180800',
-                                'webcast_sdk_version': '1.0.14-beta.0',
-                                'compress': 'gzip',
-                                'device_platform': 'web',
-                                'cookie_enabled': 'true',
-                                'screen_width': '1920', 'screen_height': '1080',
-                                'browser_language': navigator.language || 'zh-CN',
-                                'browser_platform': 'Win32',
-                                'browser_name': 'Mozilla',
-                                'browser_version': navigator.userAgent,
-                                'browser_online': 'true',
-                                'tz_name': 'Asia/Shanghai',
-                                'cursor': cursor,
-                                'internal_ext':
-                                    'internal_src:dim|wss_push_room_id:' + roomId +
-                                    '|wss_push_did:0|dim_log_id:' + ts +
-                                    '|fetch_time:' + ts + '|seq:1|wss_info:0-' + ts + '-0-0',
-                                'host': 'https://live.douyin.com',
-                                'aid': '6383', 'live_id': '1', 'did_rule': '3',
-                                'endpoint': 'live_pc', 'support_wrds': '1',
-                                'identity': 'audience',
-                                'room_id': roomId,
-                                'heartbeatDuration': '0',
-                            }});
-                            const fullUrl = baseUrl + '?' + params.toString();
-                            let signedUrl = fullUrl;
-                            try {{
-                                if (window.byted_acrawler && window.byted_acrawler.frontierSign) {{
-                                    const signResult = await window.byted_acrawler.frontierSign(fullUrl);
-                                    if (typeof signResult === 'string') signedUrl = signResult;
-                                    else if (signResult && signResult['X-Bogus']) {{
-                                        signedUrl = fullUrl + '&X-Bogus=' + signResult['X-Bogus'];
-                                    }}
-                                }}
-                            }} catch(e) {{}}
-                            try {{
-                                const resp = await fetch(signedUrl, {{
-                                    method: 'GET',
-                                    credentials: 'include',
-                                }});
-                                if (!resp.ok) return {{ error: 'HTTP ' + resp.status }};
-                                const buf = await resp.arrayBuffer();
-                                const bytes = new Uint8Array(buf);
-                                let bin = '';
-                                for (let i = 0; i < bytes.length; i++)
-                                    bin += String.fromCharCode(bytes[i]);
-                                return {{ data: btoa(bin), size: bytes.length }};
-                            }} catch(e) {{
-                                return {{ error: e.message }};
-                            }}
-                        }}
-                    """)
-                    if not fetch_result or fetch_result.get("error"):
-                        return fetch_result
-                    raw = base64.b64decode(fetch_result["data"])
-                    # fetch 响应是 gzip 压缩的 Response protobuf（同 WS payload）
-                    import gzip as _gzip
-                    try:
-                        decompressed = _gzip.decompress(raw)
-                    except Exception:
-                        decompressed = raw
-                    from data_pipeline.proto.douyin_decoder import parse_response
-                    response = parse_response(decompressed)
-                    new_cursor = response.get("cursor", "")
-                    if new_cursor:
-                        _fetch_cursor = new_cursor
-                    new_msgs = 0
-                    for msg_bytes in response.get("messages_list", []):
-                        try:
-                            from data_pipeline.proto.douyin_decoder import parse_message, MESSAGE_PARSERS
-                            msg = parse_message(msg_bytes)
-                            method = msg["method"]
-                            payload = msg["payload"]
-                            parser = MESSAGE_PARSERS.get(method)
-                            if parser and payload:
-                                parsed = parser(payload)
-                                parsed["method"] = method
-                                # 去重
-                                msg_id = parsed.get("msg_id") or parsed.get("id") or ""
-                                if msg_id and msg_id in _fetch_seen_msg_ids:
-                                    continue
-                                if msg_id:
-                                    _fetch_seen_msg_ids.add(msg_id)
-                                    if len(_fetch_seen_msg_ids) > 5000:
-                                        _fetch_seen_msg_ids = set(
-                                            list(_fetch_seen_msg_ids)[-2000:]
-                                        )
-                                if asyncio.iscoroutinefunction(callback):
-                                    await callback(parsed, room_id, "douyin")
-                                else:
-                                    callback(parsed, room_id, "douyin")
-                                message_count[0] += 1
-                                new_msgs += 1
-                        except Exception:
-                            pass
-                    return {"new_msgs": new_msgs, "cursor": new_cursor[:20]}
-                except Exception as e:
-                    return {"error": str(e)}
-
-            # 若 JS WS 已关闭，尝试 HTTP fetch 兜底
-            try:
-                ws_status = await monitor_page.evaluate(
-                    "() => window.__wsStatus || 'unknown'"
-                )
-            except Exception:
-                ws_status = "unknown"
-            if (
-                ws_status.startswith("closed")
-                or ws_status.startswith("failed")
-                or ws_status == "error"
-            ):
-                logger.info(
-                    f"[房间 {room_id}] WS 不可用 ({ws_status})，启用 HTTP fetch 轮询..."
-                )
-                # 首次 fetch 测试
-                test = await _do_one_fetch()
-                if test and not test.get("error"):
-                    _fetch_fallback_active = True
-                    logger.info(
-                        f"[房间 {room_id}] HTTP fetch 成功！首批 {test.get('new_msgs', 0)} 条消息"
-                    )
-                else:
-                    logger.warning(
-                        f"[房间 {room_id}] HTTP fetch 失败: {test}"
-                    )
+                return {"error": "fetch disabled"}
 
             # ── 阶段 C：主采集循环 ──
             logger.info(
@@ -1982,6 +2433,7 @@ class DouyinLiveCrawler:
             _fetch_tick = 0
             _ws_dead_since = None        # 记录 WS 断开时间
             _ws_reconnect_cooldown = 0   # 重连冷却时间戳
+            _ws_ever_connected = len(ws_ids) > 0  # WS 是否曾经连接过
             _inactivity_last_count = message_count[0]  # 不活动检测：上次消息计数
             _inactivity_since = time.time()             # 不活动检测：上次有新消息的时间
             while time.time() - start_time < duration:
@@ -2002,6 +2454,12 @@ class DouyinLiveCrawler:
 
                 if _ws_alive:
                     _ws_dead_since = None  # 重置断开计时
+                    if not _ws_ever_connected:
+                        _ws_ever_connected = True
+                        logger.info(
+                            f"[房间 {room_id}] CDP 捕获到原生 WebSocket！"
+                            f"（{len(ws_ids)} 个连接）"
+                        )
                     # ── 不活动检测：WS活着但长时间无新消息 → 退出以便切换到更活跃的房间 ──
                     if message_count[0] > _inactivity_last_count:
                         _inactivity_last_count = message_count[0]
@@ -2020,14 +2478,19 @@ class DouyinLiveCrawler:
                 # ── WebSocket 已断开 ──
                 if _ws_dead_since is None:
                     _ws_dead_since = time.time()
-                    logger.warning(
-                        f"[房间 {room_id}] WebSocket 已断开，准备重连..."
-                    )
+                    if _ws_ever_connected:
+                        logger.warning(
+                            f"[房间 {room_id}] WebSocket 已断开，准备重连..."
+                        )
+                    else:
+                        logger.info(
+                            f"[房间 {room_id}] 等待原生 WebSocket 建立中..."
+                        )
 
                 _dead_duration = time.time() - _ws_dead_since
 
-                # 策略1：断开 10~30 秒内 → 尝试刷新页面重连
-                if 10 < _dead_duration < 30 and time.time() > _ws_reconnect_cooldown:
+                # 策略1：断开 120~180 秒内且曾经连接过 → 尝试刷新页面重连
+                if _ws_ever_connected and 120 < _dead_duration < 180 and time.time() > _ws_reconnect_cooldown:
                     try:
                         logger.info(
                             f"[房间 {room_id}] 尝试刷新页面重连 WebSocket..."
@@ -2062,28 +2525,16 @@ class DouyinLiveCrawler:
                         )
                         _fetch_fallback_active = True
 
-                # 策略2：断开超过 30 秒 → 启用 HTTP fetch 兜底
-                if _dead_duration >= 30 and not _fetch_fallback_active:
+                # 策略2：断开超过 180 秒且曾连接过 → 日志提醒（HTTP fetch 已禁用）
+                if _ws_ever_connected and _dead_duration >= 180:
                     logger.info(
-                        f"[房间 {room_id}] WS 断开超 30s，启用 HTTP fetch 兜底"
+                        f"[房间 {room_id}] WS 断开超 180s"
                     )
-                    _fetch_fallback_active = True
-                    # 首次 fetch 测试
-                    test = await _do_one_fetch()
-                    if test and not test.get("error"):
-                        logger.info(
-                            f"[房间 {room_id}] HTTP fetch 成功！"
-                            f"首批 {test.get('new_msgs', 0)} 条消息"
-                        )
-                    else:
-                        logger.warning(
-                            f"[房间 {room_id}] HTTP fetch 也失败: {test}"
-                        )
 
-                # 策略3：断开超过 180 秒 → 提前退出，让外层 while True 重启整个流
-                if _dead_duration >= 180:
+                # 策略3：断开超过 300 秒 → 提前退出，让外层 while True 重启整个流
+                if _dead_duration >= 300:
                     logger.info(
-                        f"[房间 {room_id}] WS 断开超 3 分钟，提前退出采集循环"
+                        f"[房间 {room_id}] WS 断开超 5 分钟，提前退出采集循环"
                     )
                     break
 
@@ -2388,6 +2839,7 @@ class DouyinLiveCrawler:
         callback: Optional[Callable] = None,
         monitor_products: bool = True,
         shared_context=None,
+        signing_page=None,
     ):
         """
         持续监控一个直播间：抓取弹幕流 + 定时获取商品列表。
@@ -2396,6 +2848,7 @@ class DouyinLiveCrawler:
             room_id:          直播间 ID。
             callback:         弹幕消息回调函数。
             monitor_products: 是否同时监控商品列表变化。
+            signing_page:     Playwright page for frontierSign URL signing.
         """
         logger.info(f"启动房间监控: {room_id}")
 
@@ -2454,12 +2907,44 @@ class DouyinLiveCrawler:
                         if _hp:
                             try: await _hp.close()
                             except: pass
-                await self.start_danmaku_stream(
-                    room_id=room_id,
-                    callback=callback,
-                    duration=3600,  # 每次运行 1 小时
-                    shared_context=shared_context,
-                )
+                # ── 主方案：CDP 被动截帧（非无头模式下页面原生 WS）──
+                # 诊断确认：抖音仅在非无头模式建立 WebSocket，headless 回退到 HTTP 轮询
+                # CDP 在网络层被动捕获页面自己的 WS 连接，对页面完全透明
+                try:
+                    await self.start_danmaku_stream(
+                        room_id=room_id,
+                        callback=callback,
+                        duration=1200,  # 每次运行 20 分钟，更频繁轮换
+                        shared_context=shared_context,
+                    )
+                    # CDP completed normally (duration expired or room ended)
+                    continue  # restart loop to reconnect
+                except Exception as cdp_err:
+                    logger.info(f"[房间 {room_id}] CDP截帧失败({str(cdp_err)[:50]}), 尝试桥接WS")
+
+                # 备用方案1：浏览器桥接模式（JS内WebSocket）
+                if signing_page:
+                    try:
+                        await self.start_danmaku_bridge(
+                            room_id=room_id,
+                            callback=callback,
+                            duration=1200,
+                            signing_page=signing_page,
+                        )
+                        continue
+                    except Exception as bridge_err:
+                        logger.info(f"[房间 {room_id}] 桥接WS失败({str(bridge_err)[:50]}), 尝试直连")
+
+                # 备用方案2：直连WebSocket模式
+                try:
+                    await self.start_danmaku_direct(
+                        room_id=room_id,
+                        callback=callback,
+                        duration=1200,
+                        signing_page=signing_page,
+                    )
+                except Exception as direct_err:
+                    logger.info(f"[房间 {room_id}] 所有弹幕方案均失败，等待重试")
                 _context_dead_count = 0  # 成功后重置计数
             except Exception as e:
                 err_str = str(e)

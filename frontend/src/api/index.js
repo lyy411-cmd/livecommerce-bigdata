@@ -62,7 +62,6 @@ export const getActivities = () => request.get('/datavis/dashboard/activities')
 export const getRealtimeRooms = () => request.get('/live/rooms')
 export const getRoomDanmaku = (roomId, limit = 100) => request.get(`/live/room/${roomId}/danmaku`, { params: { limit } })
 export const getRoomDanmakuStats = (roomId) => request.get(`/live/room/${roomId}/danmaku-stats`)
-export const getRoomProducts = (roomId) => request.get(`/live/room/${roomId}/products`)
 export const getHotwords = () => request.get('/datavis/dashboard/hotwords')
 
 // ===== 爬虫管理 =====

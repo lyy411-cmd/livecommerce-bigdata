@@ -3,6 +3,9 @@
     <el-card>
       <div class="search-bar">
         <el-input v-model="query.search" placeholder="搜索直播间/主播名" clearable style="width:220px" @keyup.enter="onSearch" />
+        <el-select v-model="query.category" placeholder="全部类目" clearable style="width:130px" @change="onSearch">
+          <el-option v-for="c in categories" :key="c" :label="c" :value="c" />
+        </el-select>
         <el-button type="primary" @click="onSearch">搜索</el-button>
         <el-button @click="onRefresh" class="refresh-btn">刷新</el-button>
         <el-button @click="onRotate" :loading="rotating" class="rotate-btn" type="warning" plain size="small">
@@ -17,7 +20,7 @@
             {{ filteredLive.length }} 直播中
           </el-tag>
           <el-tag type="info" size="large" style="margin-left:8px">
-            {{ finishedRooms.length }} 已结束
+            {{ finishedTotal || finishedRooms.length }} 已结束
           </el-tag>
           <span v-if="lastUpdate" class="update-time">更新于 {{ lastUpdate }}</span>
         </div>
@@ -68,7 +71,7 @@
           <el-empty v-else description="暂无直播中的带货直播间，等待爬虫发现新房间..." :image-size="80" />
         </el-tab-pane>
 
-        <el-tab-pane :label="`已结束 (${finishedRooms.length})`" name="finished">
+        <el-tab-pane :label="`已结束 (${finishedTotal || finishedRooms.length})`" name="finished">
           <el-table
             v-if="finishedRooms.length"
             :data="filteredFinished"
@@ -113,11 +116,13 @@ import { getRoomPage, getLiveRooms, rotateDemoRooms, refreshLiveRooms } from '@/
 
 const router = useRouter()
 
-const query = reactive({ search: '' })
+const query = reactive({ search: '', category: '' })
 const activeTab = ref('live')
 const liveRooms = ref([])
 const finishedRooms = ref([])
+const finishedTotal = ref(0)
 const lastUpdate = ref('')
+const categories = ['美妆', '服饰', '食品', '数码', '家居', '母婴', '珠宝', '运动', '综合']
 
 const formatNum = (n) => {
   const v = Number(n || 0)
@@ -127,12 +132,18 @@ const formatNum = (n) => {
 }
 
 const filterBySearch = (rooms) => {
-  if (!query.search) return rooms
-  const kw = query.search.toLowerCase()
-  return rooms.filter(r =>
-    (r.roomName || '').toLowerCase().includes(kw) ||
-    (r.anchorName || '').toLowerCase().includes(kw)
-  )
+  let result = rooms
+  if (query.search) {
+    const kw = query.search.toLowerCase()
+    result = result.filter(r =>
+      (r.roomName || '').toLowerCase().includes(kw) ||
+      (r.anchorName || '').toLowerCase().includes(kw)
+    )
+  }
+  if (query.category) {
+    result = result.filter(r => (r.category || '') === query.category)
+  }
+  return result
 }
 
 const filteredLive = computed(() => filterBySearch(liveRooms.value))
@@ -149,8 +160,11 @@ const fetchLiveRooms = async () => {
 
 const fetchFinishedRooms = async () => {
   try {
-    const res = await getRoomPage({ status: 'finished', pageSize: 100 })
+    const params = { status: 'finished', pageSize: 500 }
+    if (query.category) params.category = query.category
+    const res = await getRoomPage(params)
     finishedRooms.value = res?.data?.records || []
+    finishedTotal.value = res?.data?.total || finishedRooms.value.length
   } catch (e) { console.error('fetchFinishedRooms error:', e) }
 }
 
@@ -161,7 +175,7 @@ const fetchData = async () => {
 }
 
 const onSearch = () => fetchData()
-const onRefresh = () => { query.search = ''; fetchData() }
+const onRefresh = () => { query.search = ''; query.category = ''; fetchData() }
 const onTabChange = () => {}
 
 const rotating = ref(false)

@@ -21,7 +21,7 @@ PWD = '123456'
 DB_NAME = 'livecommerce_db'
 
 TARGET_ECOM_ROOMS = 15
-MAX_ROOMS_TO_WRITE = 25
+MAX_ROOMS_TO_WRITE = 500  # 全平台候选池，集群API实时验证(status+cart)上限500
 
 
 def scrape_rooms_from_db():
@@ -37,15 +37,16 @@ def scrape_rooms_from_db():
     seen = set()
 
     # Step 1: Get currently-live rooms with valid web_rid (highest priority)
+    # 不再依赖 DB 的 has_shopping_cart（数据不可靠），改为集群 API 实时验证
     cur.execute("""
         SELECT room_id_external, room_name, anchor_name, category,
                viewer_count, live_url, data_source
         FROM live_room
-        WHERE status='live' AND has_shopping_cart=1 AND data_source='real'
+        WHERE status='live' AND data_source='real'
         AND room_id_external IS NOT NULL AND room_id_external != ''
         ORDER BY viewer_count DESC
-        LIMIT %s
-    """, (MAX_ROOMS_TO_WRITE,))
+        LIMIT 500
+    """, ())
     for r in cur.fetchall():
         rid = str(r.get('room_id_external', ''))
         if rid and rid not in seen:
@@ -62,23 +63,15 @@ def scrape_rooms_from_db():
 
     print(f'  [DB] Found {len(rooms)} currently-live ecom rooms', file=sys.stderr)
 
-    # Step 2: If not enough, supplement with high-viewer finished rooms
-    # Pick from diverse categories, prioritizing recently-active rooms
-    if len(rooms) < MAX_ROOMS_TO_WRITE:
-        needed = MAX_ROOMS_TO_WRITE * 2 - len(rooms)
-        cur.execute("""
-            SELECT room_id_external, room_name, anchor_name, category,
-                   viewer_count, live_url, data_source
-            FROM live_room
-            WHERE has_shopping_cart=1 AND data_source='real'
-            AND room_id_external IS NOT NULL AND room_id_external != ''
-            AND category NOT IN ('ecommerce', '')
-            AND room_id_external NOT IN ({})
-            ORDER BY viewer_count DESC
-            LIMIT %s
-        """.format(','.join(['%s'] * len(seen)) if seen else '""'),
-            list(seen) + [needed] if seen else [needed],
-        )
+    # Step 2: Multi-strategy diverse selection
+    _SELECT = ("SELECT room_id_external, room_name, anchor_name, category, "
+               "viewer_count, live_url, data_source FROM live_room "
+               "WHERE data_source='real' "
+               "AND room_id_external IS NOT NULL AND room_id_external != '' ")
+
+    def _add_batch(query, params, label):
+        _n = 0
+        cur.execute(query, params)
         for r in cur.fetchall():
             rid = str(r.get('room_id_external', ''))
             if rid and rid not in seen:
@@ -90,10 +83,27 @@ def scrape_rooms_from_db():
                     'category': r.get('category', ''),
                     'viewer_count': int(r.get('viewer_count', 0)),
                     'live_url': r.get('live_url', '') or f'https://live.douyin.com/{rid}',
-                    'status': 'from_archive',
+                    'status': label,
                 })
+                _n += 1
+        return _n
 
-    print(f'  [DB] Total rooms selected: {len(rooms)}', file=sys.stderr)
+    # 2a: High viewer rooms
+    if len(rooms) < MAX_ROOMS_TO_WRITE:
+        _a = _add_batch(_SELECT + "ORDER BY viewer_count DESC LIMIT 300", (), 'from_high_viewer')
+        print(f'  [DB] 2a high-viewer: +{_a}', file=sys.stderr)
+
+    # 2b: Recently active rooms
+    if len(rooms) < MAX_ROOMS_TO_WRITE:
+        _b = _add_batch(_SELECT + "ORDER BY start_time DESC LIMIT 300", (), 'from_recent')
+        print(f'  [DB] 2b recent: +{_b}', file=sys.stderr)
+
+    # 2c: Random sample for diversity
+    if len(rooms) < MAX_ROOMS_TO_WRITE:
+        _c = _add_batch(_SELECT + "ORDER BY RAND() LIMIT 300", (), 'from_random')
+        print(f'  [DB] 2c random: +{_c}', file=sys.stderr)
+
+    print(f'  [DB] Total rooms selected: {len(rooms)} (diverse: high-viewer + recent + random)', file=sys.stderr)
 
     # Step 3: Refresh selected rooms to 'live' status in both tables
     refreshed = 0
@@ -116,13 +126,15 @@ def scrape_rooms_from_db():
                      status, viewer_count, order_count, gmv, live_url,
                      room_id_external, data_source, has_shopping_cart, start_time)
                 VALUES
-                    (%s,%s,%s,'douyin',%s,'live',%s,%s,%s,%s,%s,'real',1,NOW())
+                    (%s,%s,%s,'douyin',%s,'checking',%s,%s,%s,%s,%s,'real',0,NOW())
                 ON DUPLICATE KEY UPDATE
                     room_name=VALUES(room_name), anchor_name=VALUES(anchor_name),
                     viewer_count=VALUES(viewer_count), category=VALUES(category),
                     order_count=VALUES(order_count), gmv=VALUES(gmv),
                     live_url=VALUES(live_url),
-                    data_source='real'
+                    data_source='real',
+                    status=CASE WHEN status='live' THEN 'live' ELSE 'checking' END,
+                    start_time=NOW()
             """, (room_no, title[:80], anchor[:40], cat, viewers,
                   orders, gmv, live_url, web_rid))
 
@@ -132,7 +144,7 @@ def scrape_rooms_from_db():
                      status, current_viewers, peak_viewers, total_orders,
                      total_gmv, live_url, start_time)
                 VALUES
-                    (%s,%s,%s,'douyin',%s,'live',%s,%s,%s,%s,%s,NOW())
+                    (%s,%s,%s,'douyin',%s,'checking',%s,%s,%s,%s,%s,NOW())
                 ON DUPLICATE KEY UPDATE
                     room_name=VALUES(room_name), anchor_name=VALUES(anchor_name),
                     current_viewers=VALUES(current_viewers),
@@ -141,6 +153,8 @@ def scrape_rooms_from_db():
                     total_orders=VALUES(total_orders),
                     total_gmv=VALUES(total_gmv),
                     live_url=VALUES(live_url),
+                    status=CASE WHEN status='live' THEN 'live' ELSE 'checking' END,
+                    start_time=NOW(),
                     update_time=NOW()
             """, (web_rid, title[:80], anchor[:40], cat, viewers,
                   peak, orders, gmv, live_url))
@@ -148,23 +162,9 @@ def scrape_rooms_from_db():
         except Exception as e:
             print(f'  [DB] Error refreshing room {web_rid}: {e}', file=sys.stderr)
 
-    # Step 4: Mark rooms NOT in our selection as 'ended'
-    selected_rids = [r['web_rid'] for r in rooms[:MAX_ROOMS_TO_WRITE]]
-    if selected_rids:
-        placeholders = ','.join(['%s'] * len(selected_rids))
-        cur.execute(
-            f"UPDATE rt_room_stats SET status='ended' "
-            f"WHERE platform='douyin' AND status='live' "
-            f"AND room_id NOT IN ({placeholders})",
-            selected_rids,
-        )
-        cur.execute(
-            f"UPDATE live_room SET status='finished' "
-            f"WHERE platform='douyin' AND status='live' "
-            f"AND data_source='real' "
-            f"AND room_id_external NOT IN ({placeholders})",
-            selected_rids,
-        )
+    # Step 4: (REMOVED - danmaku collector manages room lifecycle via inactivity timeout)
+    # Previously this marked non-selected rooms as 'finished', but it conflicted with
+    # the auto_danmaku_collector which writes rooms as 'live' and manages them directly.
 
     conn.commit()
     conn.close()

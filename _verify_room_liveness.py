@@ -7,9 +7,9 @@ import pymysql
 VMS = {'mysql': '192.168.104.100:3306'}
 USER, PWD, DB = 'root', '123456', 'livecommerce_db'
 COOKIE_FILE = r'C:\Users\MECHREVO\Desktop\星播大数据分析平台\data_pipeline\cookies\douyin_cookies.json'
-BATCH_SIZE = 5
-MAX_ROOMS = 25
-SCRIPT_VERSION = 2  # v2: added shopping cart detection
+BATCH_SIZE = 8
+MAX_ROOMS = 100
+SCRIPT_VERSION = 3  # v3: increased limits, marks ended as finished
 
 def get_candidates():
     conn = pymysql.connect(host=VMS['mysql'].split(':')[0], port=3306,
@@ -47,7 +47,7 @@ async def verify_rooms(candidates):
                     try:
                         rid = str(room.get('room_id_external', ''))
                         await page.goto(f'https://live.douyin.com/{rid}',
-                            wait_until='domcontentloaded', timeout=15000)
+                            wait_until='domcontentloaded', timeout=30000)
                         await page.wait_for_timeout(6000)
                         body = await page.evaluate('document.body?.innerText || ""')
                         if '已结束' in body or '直播已结束' in body:
@@ -104,23 +104,33 @@ async def verify_rooms(candidates):
     return results
 
 def update_db(results):
+    """Mark ended/no_cart as finished, confirm live rooms as live."""
     conn = pymysql.connect(host=VMS['mysql'].split(':')[0], port=3306,
         user=USER, password=PWD, database=DB, charset='utf8mb4', connect_timeout=10)
     cur = conn.cursor()
-    ended_ids = results['ended'] + results['no_cart']
     ended = 0
-    if ended_ids:
-        ph = ','.join(['%s'] * len(ended_ids))
+    live = 0
+    # Mark ended rooms as finished
+    if results['ended']:
+        ph = ','.join(['%s'] * len(results['ended']))
         cur.execute(f"UPDATE live_room SET status='finished' "
                     f"WHERE room_id_external IN ({ph}) AND data_source='real'",
-                    ended_ids)
+                    results['ended'])
         ended = cur.rowcount
-        cur.execute(f"UPDATE rt_room_stats SET status='ended' "
-                    f"WHERE room_id IN ({ph})", ended_ids)
-    live = 0
+        cur.execute(f"UPDATE rt_room_stats SET status='finished' "
+                    f"WHERE room_id IN ({ph})",
+                    results['ended'])
+    # Mark no_cart rooms as finished
+    if results.get('no_cart'):
+        ph = ','.join(['%s'] * len(results['no_cart']))
+        cur.execute(f"UPDATE live_room SET status='finished' "
+                    f"WHERE room_id_external IN ({ph}) AND data_source='real'",
+                    results['no_cart'])
+        ended += cur.rowcount
+    # Confirm live rooms
     if results['live']:
         ph = ','.join(['%s'] * len(results['live']))
-        cur.execute(f"UPDATE live_room SET status='live' "
+        cur.execute(f"UPDATE live_room SET status='live', has_shopping_cart=1 "
                     f"WHERE room_id_external IN ({ph}) AND data_source='real'",
                     results['live'])
         live = cur.rowcount

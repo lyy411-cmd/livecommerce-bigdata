@@ -22,11 +22,13 @@
       </div>
       <div v-if="!visibleMessages.length && !loading && !wsConnected && isLive" class="dm-status dm-status-wait">
         <div class="dm-status-icon">◉</div>
-        等待实时弹幕接入中...
+        <div>该房间暂未接入弹幕采集</div>
+        <div class="dm-status-hint">系统正在轮询监控，下一周期将自动接入</div>
       </div>
       <div v-if="!visibleMessages.length && !loading && !isLive && !historyLoaded" class="dm-status dm-status-empty">
         <div class="dm-status-icon">◇</div>
-        该直播间暂无弹幕记录
+        <div>该直播间暂无弹幕记录</div>
+        <div class="dm-status-hint">直播期间未被采集或已结束</div>
       </div>
       <div v-if="replayDone && visibleMessages.length" class="dm-replay-end">
         — 弹幕回放结束 · 共 {{ visibleMessages.length }} 条 —
@@ -267,6 +269,7 @@ defineExpose({ addMessage, messages })
 /* Status messages */
 .dm-status { text-align: center; padding: 60px 0; color: rgba(255,255,255,0.25); font-size: 13px; }
 .dm-status-icon { font-size: 24px; margin-bottom: 12px; opacity: 0.3; animation: spin 2s linear infinite; }
+.dm-status-hint { font-size: 11px; color: rgba(255,255,255,0.15); margin-top: 6px; }
 .dm-status-wait .dm-status-icon { color: #00ffcc; animation: pulse 2s infinite; }
 .dm-status-empty .dm-status-icon { animation: none; }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
