@@ -183,9 +183,7 @@ function connectWebSocket() {
   if (!props.isLive) return // Don't connect WS for ended rooms
 
   const shortId = shortRoomId.value
-  const url = props.wsUrl || (shortId
-    ? `ws://localhost:8765/danmaku/${shortId}`
-    : `ws://localhost:8765/danmaku/all`)
+  const url = props.wsUrl || `ws://localhost:8765/danmaku/all`
 
   try {
     ws = new WebSocket(url)

@@ -23,6 +23,9 @@ export const updateRoom = (data) => request.put('/livecommerce/room/update', dat
 export const deleteRoom = (id) => request.delete('/livecommerce/room/delete', { params: { id } })
 export const rotateDemoRooms = () => request.post('/livecommerce/room/rotate-demo')
 export const refreshLiveRooms = () => request.post('/livecommerce/room/refresh-live')
+export const discoverRooms = () => request.post('/livecommerce/room/discover')
+export const getDiscoverStatus = () => request.get('/livecommerce/room/discover/status')
+export const getDanmakuSummary = () => request.get('/danmaku/summary')
 
 // ===== 主播 =====
 export const getAnchorPage = (params) => request.get('/livecommerce/anchor/page', { params })

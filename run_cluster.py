@@ -68,6 +68,10 @@ _anchor_crawl_pid = None  # anchor crawl subprocess PID
 
 FRONTEND_PORT = 5173
 
+# 真实 Chrome CDP 模式（通过 --real-chrome 参数启用）
+_real_chrome = False
+_cdp_port = None
+
 
 def _mysql_connect_retry(database=None, max_retries=3, connect_timeout=15):
     """Connect to MySQL with retries and longer timeout to handle VM intermittent connectivity."""
@@ -223,7 +227,7 @@ def init_database():
             ("room_id_external", "VARCHAR(50)"),
             ("cover_url", "VARCHAR(500)"),
             ("data_source", "VARCHAR(20) DEFAULT 'simulated'"),
-            ("has_shopping_cart", "TINYINT DEFAULT 1"),
+            ("has_shopping_cart", "TINYINT DEFAULT 0"),
         ]:
             try:
                 cursor.execute(f"ALTER TABLE live_room ADD COLUMN {col_name} {col_def}")
@@ -474,6 +478,43 @@ class APIHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         p = self.path.split('?')[0]
 
+        # ---- Cart Verify Extension bridge (GET) ----
+        if p == '/api/cart_verify/poll':
+            with _cart_verify_lock:
+                if _cart_verify_pending:
+                    self._send(_cart_verify_pending)
+                else:
+                    self._send({})
+            return
+
+        if p == '/api/cart_verify/status':
+            with _cart_verify_lock:
+                result = _cart_verify_result
+                progress = _cart_verify_progress
+            if result:
+                self._send({'running': False, 'done': True, 'results': result, 'progress': result.get('progress', {})})
+            elif progress:
+                self._send({'running': True, 'done': False, 'progress': progress})
+            else:
+                self._send({'running': False, 'done': False, 'progress': {}})
+            return
+
+        if p == '/api/livecommerce/room/discover/status':
+            with _cart_verify_lock:
+                cv_progress = _cart_verify_progress
+            phase = ''
+            if _discovery_running:
+                if cv_progress and cv_progress.get('total'):
+                    phase = f"DOM验证: {cv_progress.get('done',0)}/{cv_progress.get('total',0)} 购物车:{cv_progress.get('cart',0)}"
+                else:
+                    phase = '爬取+API验证中...'
+            self._send({'code': 0, 'data': {
+                'running': _discovery_running,
+                'phase': phase,
+                'cartVerify': cv_progress
+            }})
+            return
+
         # SSE 短轮询：客户端每3秒拉取一次，传入 lastIdx 返回增量事件
         if p == '/api/events/stream':
             from urllib.parse import urlparse, parse_qs
@@ -666,11 +707,11 @@ class APIHandler(BaseHTTPRequestHandler):
                     'color': '#00ffcc', 'icon': 'order'
                 })
             # 2) 观众最多的直播间
-            rooms = query_mysql("SELECT room_name, anchor_name, viewer_count FROM live_room WHERE deleted=0 ORDER BY viewer_count DESC LIMIT 2")
+            rooms = query_mysql("SELECT room_name, anchor_name, viewer_count FROM live_room WHERE deleted=0 AND status='live' ORDER BY viewer_count DESC LIMIT 2")
             for i, rm in enumerate(rooms or []):
-                time_str = '刚刚' if i == 0 else f'{random.randint(2, 5)}分钟前'
+                time_str = '刚刚' if i == 0 else f'{random.randint(2, 8)}分钟前'
                 activities.append({
-                    'text': f"直播间「{rm['room_name']}」在线观众 {int(rm['viewer_count'] or 0):,}",
+                    'text': f"「{rm['anchor_name']}」正在直播，{int(rm['viewer_count'] or 0):,} 人观看",
                     'time': time_str,
                     '_sort': 0 if time_str == '刚刚' else int(time_str.replace('分钟前', '')) * 60,
                     'color': '#a855f7', 'icon': 'live'
@@ -679,27 +720,53 @@ class APIHandler(BaseHTTPRequestHandler):
             anchors = query_mysql("SELECT name, total_gmv, total_orders, avg_conversion FROM anchor WHERE deleted=0 ORDER BY total_gmv DESC LIMIT 1")
             if anchors:
                 a = anchors[0]
-                gmv_yi = float(a['total_gmv']) / 1e8
+                gmv_yi = float(a['total_gmv'] or 0) / 1e8
+                gmv_str = f"{gmv_yi:.1f}亿" if gmv_yi >= 1 else f"{float(a['total_gmv'] or 0)/1e4:.0f}万"
                 activities.append({
-                    'text': f"主播「{a['name']}」累计 GMV {gmv_yi:.1f}亿，转化率 {float(a['avg_conversion']):.1f}%",
-                    'time': '15分钟前',
-                    '_sort': 15 * 60,
+                    'text': f"主播「{a['name']}」累计GMV {gmv_str}，{int(a['total_orders'] or 0)} 笔订单",
+                    'time': f'{random.randint(10, 20)}分钟前',
+                    '_sort': random.randint(10, 20) * 60,
                     'color': '#ffa502', 'icon': 'star'
                 })
-            # 4) 类目分布
+            # 4) 弹幕采集状态
+            try:
+                dm_count = query_mysql("SELECT COUNT(*) as cnt FROM rt_danmaku WHERE event_time > DATE_SUB(NOW(), INTERVAL 1 HOUR)")
+                dm_total = query_mysql("SELECT COUNT(*) as cnt FROM rt_danmaku")
+                live_cnt = query_mysql("SELECT COUNT(*) as cnt FROM live_room WHERE status='live' AND has_shopping_cart=1 AND deleted=0")
+                dm_h = dm_count[0]['cnt'] if dm_count else 0
+                dm_all = dm_total[0]['cnt'] if dm_total else 0
+                live_n = live_cnt[0]['cnt'] if live_cnt else 0
+                activities.append({
+                    'text': f"弹幕采集：{live_n} 个直播间监控中，近1小时 {dm_h} 条弹幕",
+                    'time': '实时',
+                    '_sort': 30,
+                    'color': '#00d9ff', 'icon': 'system'
+                })
+            except Exception:
+                pass
+            # 5) 类目分布
             cats = query_mysql("SELECT category, COUNT(*) as cnt FROM live_room WHERE deleted=0 AND category != '' GROUP BY category ORDER BY cnt DESC")
             if cats:
                 c = cats[0]
-                pct = round(c['cnt'] * 100 / sum(int(x['cnt']) for x in cats), 0)
+                pct = round(c['cnt'] * 100 / max(sum(int(x['cnt']) for x in cats), 1), 0)
                 activities.append({
-                    'text': f"类目「{c['category']}」直播间占比 {pct}%",
-                    'time': '30分钟前',
-                    '_sort': 30 * 60,
+                    'text': f"类目「{c['category']}」占比 {pct}%，共 {c['cnt']} 个直播间",
+                    'time': f'{random.randint(20, 40)}分钟前',
+                    '_sort': random.randint(20, 40) * 60,
                     'color': '#ff4757', 'icon': 'platform'
                 })
-            # 5) 系统状态
+            # 6) 最近结束的房间
+            ended = query_mysql("SELECT room_name, anchor_name FROM live_room WHERE deleted=0 AND status='finished' ORDER BY id DESC LIMIT 1")
+            if ended:
+                activities.append({
+                    'text': f"「{ended[0]['anchor_name']}」直播已结束",
+                    'time': f'{random.randint(5, 15)}分钟前',
+                    '_sort': random.randint(5, 15) * 60,
+                    'color': 'rgba(255,255,255,0.4)', 'icon': 'live'
+                })
+            # 7) 系统状态
             activities.append({
-                'text': f"系统：MySQL @ {VMS['mysql']} 实时同步中",
+                'text': f"数据管道运行中 · MySQL {VMS['mysql']}",
                 'time': '持续运行',
                 '_sort': 999999,
                 'color': '#00d9ff', 'icon': 'system'
@@ -709,7 +776,7 @@ class APIHandler(BaseHTTPRequestHandler):
             # 清理前端不需要的字段
             for a in activities:
                 a.pop('_sort', None)
-            self._send({'code': 0, 'data': activities[:6]})
+            self._send({'code': 0, 'data': activities[:8]})
 
         elif p.startswith('/api/livecommerce/room/page'):
             """直播间分页+搜索"""
@@ -763,7 +830,7 @@ class APIHandler(BaseHTTPRequestHandler):
             self._send({'code': 0, 'data': {'records': data, 'total': total, 'page': page_no, 'pageSize': page_size}})
 
         elif p == '/api/livecommerce/room/live':
-            rows = query_mysql("SELECT * FROM live_room WHERE deleted=0 AND status='live' ORDER BY viewer_count DESC")
+            rows = query_mysql("SELECT * FROM live_room WHERE deleted=0 AND status='live' AND has_shopping_cart=1 ORDER BY viewer_count DESC")
             data = [{
                 'id': r['id'], 'roomNo': r['room_no'], 'roomName': r['room_name'],
                 'anchorName': r['anchor_name'],
@@ -1090,6 +1157,32 @@ class APIHandler(BaseHTTPRequestHandler):
             else:
                 self._send({'code': 0, 'data': None})
 
+        elif p == '/api/danmaku/summary':
+            """弹幕全局统计：总量、最近增量、类型分布、采集状态"""
+            try:
+                total = query_mysql("SELECT COUNT(*) as c FROM rt_danmaku")
+                h1 = query_mysql("SELECT COUNT(*) as c FROM rt_danmaku WHERE event_time >= NOW() - INTERVAL 1 HOUR")
+                m5 = query_mysql("SELECT COUNT(*) as c FROM rt_danmaku WHERE event_time >= NOW() - INTERVAL 5 MINUTE")
+                m1 = query_mysql("SELECT COUNT(*) as c FROM rt_danmaku WHERE event_time >= NOW() - INTERVAL 1 MINUTE")
+                types = query_mysql("SELECT danmaku_type, COUNT(*) as c FROM rt_danmaku GROUP BY danmaku_type ORDER BY c DESC")
+                last_msg = query_mysql("SELECT MAX(event_time) as t FROM rt_danmaku")
+                rooms_with_dm = query_mysql(
+                    "SELECT COUNT(DISTINCT room_id) as c FROM rt_danmaku WHERE event_time >= NOW() - INTERVAL 1 HOUR")
+
+                self._send({'code': 0, 'data': {
+                    'total': int(total[0]['c']) if total else 0,
+                    'last1h': int(h1[0]['c']) if h1 else 0,
+                    'last5min': int(m5[0]['c']) if m5 else 0,
+                    'last1min': int(m1[0]['c']) if m1 else 0,
+                    'types': {t['danmaku_type']: int(t['c']) for t in (types or [])},
+                    'lastMsgAt': last_msg[0]['t'].strftime('%Y-%m-%d %H:%M:%S') if last_msg and last_msg[0].get('t') else '',
+                    'activeRooms': int(rooms_with_dm[0]['c']) if rooms_with_dm else 0,
+                    'discoveryRunning': _discovery_running,
+                    'discoveryLastRun': int(_discovery_last_run) if _discovery_last_run else 0,
+                }})
+            except Exception as e:
+                self._send({'code': 500, 'msg': f'stats error: {str(e)[:80]}'})
+
         elif p == '/api/crawler/status':
             """爬虫运行状态"""
             sessions = query_mysql(
@@ -1156,6 +1249,7 @@ class APIHandler(BaseHTTPRequestHandler):
             self._send({'code': 0, 'data': {}, 'msg': 'OK'})
 
     def do_POST(self):
+        global _cart_verify_pending, _cart_verify_result, _cart_verify_progress
         p = self.path.split('?')[0]
         try:
             cl = int(self.headers.get('Content-Length', 0))
@@ -1697,6 +1791,110 @@ class APIHandler(BaseHTTPRequestHandler):
             except Exception as _re:
                 self._send({'code': 500, 'msg': f'刷新失败: {str(_re)[:80]}'})
 
+        elif p == '/api/livecommerce/room/discover':
+            """先快速刷新(检测重新开播)，再异步触发全量发现"""
+            if _discovery_running:
+                # 如果全量发现正在运行，只做快速刷新
+                def _bg_quick_only():
+                    try:
+                        _qr_restarted, _qr_verified = _quick_refresh_rooms()
+                        if _qr_restarted > 0 or _qr_verified > 0:
+                            _sync_live_to_rt_stats()
+                        print(f"  [QuickRefresh] 快速刷新完成: 重开播{_qr_restarted} 验证{_qr_verified}")
+                    except Exception as e:
+                        print(f"  [QuickRefresh] 错误: {e}")
+                threading.Thread(target=_bg_quick_only, daemon=True).start()
+                self._send({'code': 0, 'msg': '全量发现正在运行中，已触发快速刷新检测重新开播的房间'})
+            else:
+                # Reset cart verify state for fresh progress tracking
+                with _cart_verify_lock:
+                    _cart_verify_pending = None
+                    _cart_verify_result = None
+                    _cart_verify_progress = None
+                def _bg_discover():
+                    try:
+                        # Step 1: 快速刷新（1-3分钟）
+                        print("  [Discovery] Step 1/2: 快速刷新检测重新开播的房间...", flush=True)
+                        _qr_restarted, _qr_verified = _quick_refresh_rooms()
+                        if _qr_restarted > 0 or _qr_verified > 0:
+                            try:
+                                _sync_live_to_rt_stats()
+                            except Exception:
+                                pass
+                            print(f"  [Discovery] 快速刷新: {_qr_restarted}个重开播, {_qr_verified}个验证在播", flush=True)
+                        # Step 2: 全量发现（30分钟+）
+                        print("  [Discovery] Step 2/2: 开始全量发现...", flush=True)
+                        ok, msg = _run_discovery_once()
+                        if ok:
+                            try:
+                                _sync_live_to_rt_stats()
+                            except Exception:
+                                pass
+                        print(f"  [Discovery] 全量发现完成: {'OK' if ok else 'WARN'} - {msg}")
+                    except Exception as e:
+                        print(f"  [Discovery] 后台发现异常: {e}")
+                threading.Thread(target=_bg_discover, daemon=True).start()
+                self._send({'code': 0, 'msg': '已开始刷新：先检测重新开播的房间(1-3分钟)，再进行全量发现(约30分钟)。列表会自动更新。'})
+
+        elif p == '/api/cart_verify/poll':
+            """Extension polls for pending cart verification tasks"""
+            with _cart_verify_lock:
+                if _cart_verify_pending:
+                    self._send(_cart_verify_pending)
+                else:
+                    self._send({})
+
+        elif p == '/api/cart_verify/submit':
+            """Discovery script submits rooms for cart verification"""
+            with _cart_verify_lock:
+                _cart_verify_pending = body  # body has 'rooms' key
+                _cart_verify_result = None
+                _cart_verify_progress = None
+            print(f"  [CartVerify] 收到验证任务: {len(body.get('rooms', []))} 个房间")
+            self._send({'code': 0, 'msg': 'task submitted'})
+
+        elif p == '/api/cart_verify/status':
+            """Discovery script polls for verification status/results"""
+            with _cart_verify_lock:
+                result = _cart_verify_result
+                progress = _cart_verify_progress
+            if result:
+                self._send({'running': False, 'done': True, 'results': result, 'progress': result.get('progress', {})})
+            elif progress:
+                self._send({'running': True, 'done': False, 'progress': progress})
+            else:
+                self._send({'running': False, 'done': False, 'progress': {}})
+
+        elif p == '/api/cart_verify/ack':
+            """Extension acknowledges receipt of task"""
+            with _cart_verify_lock:
+                _cart_verify_pending = None
+            self._send({'code': 0})
+
+        elif p == '/api/cart_verify/progress':
+            """Extension reports progress"""
+            try:
+                _cart_verify_progress = body
+                done = body.get('done', 0)
+                cart = body.get('cart', 0)
+                print(f"  [CartVerify] {done}/{body.get('total',0)} cart:{cart} nocart:{body.get('nocart',0)} captcha:{body.get('captcha',0)}")
+            except Exception:
+                pass
+            self._send({'code': 0})
+
+        elif p == '/api/cart_verify/result':
+            """Extension reports final results"""
+            try:
+                _cart_verify_result = body
+                prog = body.get('progress', {})
+                verified = body.get('verified', [])
+                print(f"  [CartVerify] DONE: {len(verified)}/{prog.get('total',0)} verified "
+                      f"(cart:{prog.get('cart',0)} nocart:{prog.get('nocart',0)} "
+                      f"ended:{prog.get('ended',0)} captcha:{prog.get('captcha',0)})")
+            except Exception as e:
+                print(f"  [CartVerify] result error: {e}")
+            self._send({'code': 0})
+
         elif p == '/api/danmaku/ingest':
             """
             接收 Chrome 扩展推送的弹幕帧（base64 编码的 Protobuf 二进制）。
@@ -2031,7 +2229,7 @@ def _simulated_danmaku_generator():
             )
             cur = conn.cursor(pymysql.cursors.DictCursor)
             cur.execute(
-                "SELECT room_id_external FROM live_room WHERE status='live' AND platform='douyin' LIMIT 60"
+                "SELECT room_id_external FROM live_room WHERE status='live' AND platform='douyin' LIMIT 1000"
             )
             rooms = [row['room_id_external'] for row in cur.fetchall() if row.get('room_id_external')]
             conn.close()
@@ -2055,67 +2253,285 @@ def _simulated_danmaku_generator():
             for room_id in rooms:
                 if not _ws_pusher or not _ws_server or not _ws_server.running:
                     break
-                # 每个房间生成 1~3 条弹幕
-                for _ in range(random.randint(1, 3)):
+                # 每个房间生成 2~4 条弹幕（快速轮询，确保所有房间每20~30秒收到弹幕）
+                for _ in range(random.randint(2, 4)):
                     msg = _generate_danmaku(room_id)
                     try:
-                        # 日志：记录每条弹幕的 room_id，便于排查串房问题
-                        if random.random() < 0.08:  # 8%概率打印日志，避免刷屏
+                        if random.random() < 0.01:
                             print(f"  [SimDanmaku] push room={room_id} type={msg.get('danmaku_type')} "
                                   f"user={msg.get('user_name','')[:8]}", flush=True)
                         _ws_pusher.push_danmaku(room_id, msg)
                     except Exception:
                         pass
-                    _time.sleep(random.uniform(0.3, 1.5))
+                    _time.sleep(random.uniform(0.02, 0.08))
 
-                # 房间间隔
-                _time.sleep(random.uniform(0.5, 2.0))
+                # 房间间隔（极短，快速覆盖所有房间）
+                _time.sleep(random.uniform(0.01, 0.03))
 
         except Exception as e:
             print(f"  [SimDanmaku] Error: {str(e)[:80]}")
             _time.sleep(5)
 
 
-def _room_auto_refresh():
-    """
-    房间自动刷新 - 已禁用，由 _auto_danmaku_collector 统一负责房间发现。
-    避免两个线程同时运行 scrape_rooms.py 导致房间数据竞争。
-    """
-    # 禁用：auto_danmaku_collector 已包含房间发现+弹幕监控的完整流程
-    print("  [RoomRefresh] 已禁用 - 由 auto_danmaku_collector 统一管理房间发现")
-    while True:
-        time.sleep(3600)  # 保持线程存活但不做任何事
-    return
-    # === 以下原始代码已禁用 ===
-    REFRESH_INTERVAL = 180  # 3 minutes
-    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scrape_rooms.py')
+_discovery_lock = threading.Lock()
+_discovery_last_run = 0
+_discovery_running = False
 
-    time.sleep(8)  # 等后端完全启动
-    print("  [RoomRefresh] 房间自动刷新线程已启动 (每3分钟)")
+# ---- Cart Verify Extension bridge ----
+_cart_verify_pending = None      # dict with 'rooms' key, set by discovery, consumed by extension
+_cart_verify_result = None       # dict with 'verified' and 'progress', set by extension
+_cart_verify_progress = None     # dict with progress stats
+_cart_verify_lock = threading.Lock()
+
+def _quick_refresh_rooms():
+    """快速刷新：通过API检查已结束房间是否重新开播，以及验证在播房间的真实性。
+    耗时约1-3分钟，适合用户点击刷新按钮时立即执行。
+    Returns (restarted_count, verified_live_count)."""
+    import urllib.request as _urllib_req
+
+    _qf_cookies = _load_douyin_cookies()
+    if not _qf_cookies:
+        print("  [QuickRefresh] 无法获取Cookie, 跳过", flush=True)
+        return 0, 0
+
+    _qf_conn = None
+    _qf_restarted = 0
+    _qf_verified = 0
+    _qf_ended = 0
+    try:
+        _qf_conn = _mysql_connect_retry(database=DB_NAME, max_retries=2, connect_timeout=10)
+        _qf_cur = _qf_conn.cursor(pymysql.cursors.DictCursor)
+        print("  [QuickRefresh] 开始快速刷新: 检查已结束房间是否重新开播...", flush=True)
+
+        # Part 1: 检查finished房间是否重新开播
+        _qf_cur.execute(
+            "SELECT room_id_external FROM live_room "
+            "WHERE status='finished' AND deleted=0 "
+            "AND room_id_external IS NOT NULL AND room_id_external != '' "
+            "ORDER BY last_verified DESC LIMIT 300"
+        )
+        _qf_finished = _qf_cur.fetchall()
+        print(f"  [QuickRefresh] 检查 {_qf_cur.rowcount or len(_qf_finished)} 个已结束房间...", flush=True)
+
+        for _qf_r in _qf_finished:
+            _qf_wr = str(_qf_r.get('room_id_external', ''))
+            if not _qf_wr:
+                continue
+            _qf_result = _api_check_room_with_cookies(_qf_wr, _qf_cookies)
+            if _qf_result:
+                _qf_status, _qf_has_commerce, _qf_room = _qf_result
+                if _qf_status == 2 and _qf_has_commerce:  # 重新开播且有购物车
+                    _qf_title = (_qf_room.get('title', '') or '')[:100]
+                    _qf_nick = ((_qf_room.get('owner', {}) or {}).get('nickname', '') or '')[:50]
+                    _qf_vs = _qf_room.get('user_count_str', '0') or '0'
+                    if '万' in str(_qf_vs):
+                        _qf_vc = int(float(str(_qf_vs).replace('万', '')) * 10000)
+                    else:
+                        _qf_vc = int(float(_qf_vs)) if _qf_vs else 0
+                    _qf_cart = 1  # already confirmed has_commerce_goods
+
+                    try:
+                        _qf_cur.execute(
+                            "UPDATE live_room SET status='live', viewer_count=%s, "
+                            "room_name=%s, anchor_name=%s, has_shopping_cart=%s, "
+                            "last_verified=NOW(), start_time=NOW() "
+                            "WHERE room_id_external=%s",
+                            (_qf_vc, _qf_title, _qf_nick, _qf_cart, _qf_wr)
+                        )
+                        _qf_cur.execute(
+                            "INSERT INTO rt_room_stats (room_id, status, current_viewers) "
+                            "VALUES (%s, 'live', %s) "
+                            "ON DUPLICATE KEY UPDATE status='live', current_viewers=%s",
+                            (_qf_wr, _qf_vc, _qf_vc)
+                        )
+                        _qf_restarted += 1
+                    except Exception:
+                        pass
+            time.sleep(0.2)
+
+        if _qf_restarted > 0:
+            _qf_conn.commit()
+
+        # Part 2: 验证当前live房间仍然在播
+        _qf_cur.execute(
+            "SELECT room_id_external FROM live_room "
+            "WHERE status='live' AND has_shopping_cart=1 AND deleted=0 "
+            "AND room_id_external IS NOT NULL AND room_id_external != '' "
+            "ORDER BY viewer_count DESC LIMIT 200"
+        )
+        _qf_live = _qf_cur.fetchall()
+        for _qf_r in _qf_live:
+            _qf_wr = str(_qf_r.get('room_id_external', ''))
+            if not _qf_wr:
+                continue
+            _qf_result2 = _api_check_room_with_cookies(_qf_wr, _qf_cookies)
+            if _qf_result2:
+                _qf_status2, _qf_commerce2, _qf_room2 = _qf_result2
+                if _qf_status2 == 4:
+                    _qf_cur.execute("UPDATE live_room SET status='finished' WHERE room_id_external=%s", (_qf_wr,))
+                    _qf_cur.execute("UPDATE rt_room_stats SET status='finished' WHERE room_id=%s", (_qf_wr,))
+                    _qf_ended += 1
+                elif _qf_status2 == 2:
+                    _qf_cur.execute("UPDATE live_room SET last_verified=NOW() WHERE room_id_external=%s", (_qf_wr,))
+                    _qf_verified += 1
+            time.sleep(0.2)
+        _qf_conn.commit()
+
+        _qf_cur.close()
+        _qf_conn.close()
+        print(f"  [QuickRefresh] 完成: 重开播{_qf_restarted}个, 验证在播{_qf_verified}个, "
+              f"新结束{_qf_ended}个", flush=True)
+    except Exception as _qf_err:
+        print(f"  [QuickRefresh] 错误: {_qf_err}", flush=True)
+        if _qf_conn:
+            try:
+                _qf_conn.close()
+            except Exception:
+                pass
+
+    return _qf_restarted, _qf_verified
+
+
+def _run_discovery_once():
+    """Run discovery_run.py once. Returns (success, output_summary)."""
+    global _discovery_last_run, _discovery_running
+    if not _discovery_lock.acquire(blocking=False):
+        return False, 'discovery already running'
+    try:
+        _discovery_running = True
+        script = os.path.join(os.path.expanduser('~'), '.qoderworkcn',
+                              'workspace', 'mresl2paqo3mxagl', 'discovery_run.py')
+        if not os.path.exists(script):
+            return False, f'discovery script not found: {script}'
+        _env = os.environ.copy()
+        _env['PYTHONUNBUFFERED'] = '1'
+        result = subprocess.run(
+            [sys.executable, '-u', script],
+            capture_output=True, text=True, timeout=3000,
+            encoding='utf-8', errors='replace',
+            env=_env,
+        )
+        output = result.stdout.strip()
+        _discovery_last_run = time.time()
+        if result.returncode == 0:
+            # Extract summary line from discovery_run.py v8 output
+            _out_lines = output.split('\n')
+            summary = ''
+            for _sl in reversed(_out_lines):
+                if any(kw in _sl for kw in ('带货直播中', '完成', 'DOM验证通过', '最终', 'SUMMARY', '发现完成')):
+                    summary = _sl.strip()
+                    break
+            return True, summary or 'discovery completed'
+        else:
+            err = result.stderr.strip()[:300] if result.stderr else output[-300:]
+            return False, f'discovery failed: {err}'
+    except subprocess.TimeoutExpired:
+        return False, 'discovery timeout (3000s)'
+    except Exception as e:
+        return False, f'discovery error: {str(e)[:120]}'
+    finally:
+        _discovery_running = False
+        _discovery_lock.release()
+
+
+def _playwright_verify_carts():
+    """
+    Run Playwright DOM verification after discovery completes.
+    Opens each live room page, waits 6s, checks for shopping cart DOM elements.
+    Rooms without cart are marked as finished, rooms with cart confirmed as live.
+    """
+    verify_script = os.path.join(BASE_DIR, '_verify_room_liveness.py')
+    if not os.path.exists(verify_script):
+        print("  [CartVerify] _verify_room_liveness.py not found, skipping Playwright verification")
+        return
+    print("  [CartVerify] Running Playwright DOM verification on all live rooms...", flush=True)
+    try:
+        vresult = subprocess.run(
+            [sys.executable, '-u', verify_script],
+            capture_output=True, text=True, timeout=900,
+            encoding='utf-8', errors='replace',
+        )
+        if vresult.returncode == 0:
+            vlines = vresult.stdout.strip().split('\n')
+            for line in vlines[-3:]:
+                print(f"  [CartVerify] {line}", flush=True)
+            # Parse JSON result
+            try:
+                vdata = json.loads(vlines[-1])
+                live_n = vdata.get('live', 0)
+                ended_n = vdata.get('ended', 0)
+                no_cart_n = vdata.get('no_cart', 0)
+                checked = vdata.get('checked', 0)
+                print(f"  [CartVerify] Result: checked={checked} live={live_n} "
+                      f"ended={ended_n} no_cart={no_cart_n}", flush=True)
+            except Exception:
+                pass
+        else:
+            err = vresult.stderr.strip()[:300] if vresult.stderr else ''
+            print(f"  [CartVerify] Script failed: {err}", flush=True)
+    except subprocess.TimeoutExpired:
+        print("  [CartVerify] Timeout (600s)", flush=True)
+    except Exception as e:
+        print(f"  [CartVerify] Error: {e}", flush=True)
+
+
+def _scheduled_discovery():
+    """
+    定时自动发现：每30分钟运行 discovery_run.py，自动发现当前正在直播的带货直播间。
+    已结束的房间会被自动标记为 finished（由 discovery_run.py 内部处理）。
+    """
+    DISCOVERY_INTERVAL = 1800  # 30 minutes
+    time.sleep(15)  # wait for backend to fully start
+    print("  [Discovery] 定时自动发现线程已启动 (每30分钟)")
 
     while True:
         try:
-            result = subprocess.run(
-                [sys.executable, script_path],
-                capture_output=True, text=True, timeout=120,
-                encoding='utf-8', errors='replace'
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                try:
-                    data = json.loads(result.stdout.strip().split('\n')[-1])
-                    count = data.get('rooms', 0)
-                    print(f"  [RoomRefresh] 已刷新 {count} 个带货直播间")
-                except json.JSONDecodeError:
-                    print(f"  [RoomRefresh] 输出解析异常: {result.stdout[:100]}")
-            else:
-                err = result.stderr[:200] if result.stderr else 'unknown'
-                print(f"  [RoomRefresh] 本轮刷新失败: {err}")
-        except subprocess.TimeoutExpired:
-            print("  [RoomRefresh] 刷新超时 (>120s)")
-        except Exception as e:
-            print(f"  [RoomRefresh] 刷新异常: {str(e)[:80]}")
+            ok, msg = _run_discovery_once()
+            status = 'OK' if ok else 'WARN'
+            print(f"  [Discovery] [{status}] {msg}")
 
-        time.sleep(REFRESH_INTERVAL)
+            # Sync live rooms to rt_room_stats for frontend
+            if ok:
+                try:
+                    _sync_live_to_rt_stats()
+                except Exception as e:
+                    print(f"  [Discovery] sync error: {e}")
+        except Exception as e:
+            print(f"  [Discovery] Error: {e}")
+
+        time.sleep(DISCOVERY_INTERVAL)
+
+
+def _sync_live_to_rt_stats():
+    """Sync live_room data to rt_room_stats for frontend display."""
+    import pymysql
+    conn = pymysql.connect(host=VMS['mysql'].split(':')[0], port=3306, user=USER, password=PWD,
+                           database=DB_NAME, charset='utf8mb4', autocommit=True)
+    cur = conn.cursor()
+    cur.execute("""SELECT room_id_external, room_name, anchor_name, viewer_count,
+                   category, gmv, order_count
+                   FROM live_room WHERE status='live' AND has_shopping_cart=1
+                   AND room_id_external IS NOT NULL AND room_id_external != ''""")
+    rooms = cur.fetchall()
+    for rid, rname, anchor, vc, cat, gmv, oc in rooms:
+        cur.execute("""INSERT INTO rt_room_stats
+            (room_id, room_name, anchor_name, status, current_viewers,
+             category, platform, total_gmv, total_orders, update_time)
+            VALUES (%s, %s, %s, 'live', %s, %s, 'douyin', %s, %s, NOW())
+            ON DUPLICATE KEY UPDATE
+                room_name=VALUES(room_name), anchor_name=VALUES(anchor_name),
+                status='live', current_viewers=VALUES(current_viewers),
+                category=VALUES(category), total_gmv=VALUES(total_gmv),
+                total_orders=VALUES(total_orders), update_time=NOW()
+        """, (rid, rname, anchor, vc or 0, cat or '', gmv or 0, oc or 0))
+    # Mark ended rooms
+    cur.execute("""UPDATE rt_room_stats SET status='finished', update_time=NOW()
+        WHERE status='live' AND platform='douyin' AND room_id NOT IN (
+            SELECT room_id_external FROM live_room
+            WHERE status='live' AND has_shopping_cart=1
+            AND room_id_external IS NOT NULL AND room_id_external != ''
+        )""")
+    conn.close()
 
 
 def _room_status_checker():
@@ -2123,7 +2539,7 @@ def _room_status_checker():
     定时房间状态检查器：每 15 分钟用 Playwright 实际验证直播间是否还在直播，
     自动将已结束的标记为 finished，保持直播中的标记为 live。
     """
-    CHECK_INTERVAL = 180  # 3 分钟
+    CHECK_INTERVAL = 1800  # 30 分钟 - 与 _scheduled_discovery 同步，避免冲突
     VERIFY_SCRIPT = os.path.join(BASE_DIR, '_verify_room_liveness.py')
 
     # 写入验证脚本（只在首次或脚本不存在时写入）
@@ -2138,7 +2554,7 @@ VMS = {'mysql': '192.168.104.100:3306'}
 USER, PWD, DB = 'root', '123456', 'livecommerce_db'
 COOKIE_FILE = r'C:\\Users\\MECHREVO\\Desktop\\星播大数据分析平台\\data_pipeline\\cookies\\douyin_cookies.json'
 BATCH_SIZE = 8
-MAX_ROOMS = 100
+MAX_ROOMS = 500
 SCRIPT_VERSION = 3  # v3: increased limits, marks ended as finished
 
 def get_candidates():
@@ -2159,8 +2575,8 @@ async def verify_rooms(candidates):
     async with async_playwright() as p:
         tmp = tempfile.mkdtemp(prefix='verify_')
         try:
-            browser = await p.chromium.launch(headless=True, channel='chrome',
-                args=['--disable-blink-features=AutomationControlled', '--headless=new',
+            browser = await p.chromium.launch(headless=False, channel='chrome',
+                args=['--disable-blink-features=AutomationControlled',
                        '--disk-cache-size=1', '--no-sandbox'])
             ctx = await browser.new_context(ignore_https_errors=True)
             try:
@@ -2309,22 +2725,8 @@ if __name__ == '__main__':
             else:
                 print(f"  [StatusCheck] scrape_rooms.py failed: {result.stderr[:100]}", flush=True)
 
-            # 第二步: 用 Playwright 实际验证房间是否还在直播
-            if os.path.exists(VERIFY_SCRIPT):
-                print("  [StatusCheck] 正在用 Playwright 验证房间存活状态...", flush=True)
-                vresult = subprocess.run(
-                    [sys.executable, VERIFY_SCRIPT],
-                    capture_output=True, text=True, timeout=300,
-                    encoding='utf-8', errors='replace',
-                )
-                if vresult.returncode == 0:
-                    vlines = vresult.stdout.strip().split('\n')
-                    vdata = json.loads(vlines[-1])
-                    print(f"  [StatusCheck] 验证完成: 检查{vdata.get('checked',0)}个 "
-                          f"确认直播={vdata.get('live',0)} "
-                          f"确认结束={vdata.get('ended',0)}", flush=True)
-                else:
-                    print(f"  [StatusCheck] 验证脚本失败: {vresult.stderr[:150]}", flush=True)
+            # 第二步: Playwright验证已禁用（cookie问题导致所有房间被误标为ended）
+            # 弹幕采集器的API验证已足够可靠
 
             # 第三步: 统计最终状态
             try:
@@ -2384,6 +2786,246 @@ if __name__ == '__main__':
             print(f"  [StatusCheck] Status stats error: {str(_demo_err)[:80]}", flush=True)
 
         time.sleep(CHECK_INTERVAL)
+
+
+_cookie_cache = {'cookies': '', 'timestamp': 0}
+_COOKIE_FILE = os.path.join(os.path.expanduser('~'), '.qoderworkcn', 'workspace',
+                             'mresl2paqo3mxagl', 'douyin_cookies.txt')
+
+def _load_douyin_cookies(force_refresh=False):
+    """Load Douyin cookies from file or extract from Chrome 125 via CDP."""
+    global _cookie_cache
+    now = time.time()
+    # Use cache if fresh enough (less than 30 min old)
+    if not force_refresh and _cookie_cache['cookies'] and (now - _cookie_cache['timestamp']) < 1800:
+        return _cookie_cache['cookies']
+    # Try file first
+    try:
+        if os.path.exists(_COOKIE_FILE):
+            mtime = os.path.getmtime(_COOKIE_FILE)
+            if (now - mtime) < 1800:  # File less than 30 min old
+                with open(_COOKIE_FILE, 'r', encoding='utf-8') as f:
+                    cookies = f.read().strip()
+                if cookies:
+                    _cookie_cache = {'cookies': cookies, 'timestamp': now}
+                    return cookies
+    except Exception:
+        pass
+    # Extract from Chrome 125 via CDP
+    try:
+        from playwright.sync_api import sync_playwright
+        _pw = sync_playwright().start()
+        _br = _pw.chromium.connect_over_cdp('http://localhost:9225')
+        _ctxs = _br.contexts
+        if _ctxs:
+            _all_cookies = _ctxs[0].cookies()
+            _dy = [c for c in _all_cookies if 'douyin' in c.get('domain', '')]
+            cookie_str = '; '.join(f'{c["name"]}={c["value"]}' for c in _dy)
+            if cookie_str:
+                try:
+                    with open(_COOKIE_FILE, 'w', encoding='utf-8') as f:
+                        f.write(cookie_str)
+                except Exception:
+                    pass
+                _cookie_cache = {'cookies': cookie_str, 'timestamp': now}
+                _br.close()
+                _pw.stop()
+                return cookie_str
+        _br.close()
+        _pw.stop()
+    except Exception as _ce:
+        pass
+    return _cookie_cache.get('cookies', '')
+
+
+def _api_check_room_with_cookies(web_rid, cookies=''):
+    """Check room status via Douyin API with cookies. Returns (status, has_commerce, room_data) or None."""
+    import urllib.request as _urllib_req
+    try:
+        _url = (
+            f"https://live.douyin.com/webcast/room/web/enter/"
+            f"?aid=6383&app_name=douyin_web&live_id=1&device_platform=web"
+            f"&language=zh-CN&enter_from=web_live&cookie_enabled=true"
+            f"&screen_width=1920&screen_height=1080&browser_language=zh-CN"
+            f"&browser_platform=Win32&browser_name=Chrome&browser_version=125.0.0.0"
+            f"&web_rid={web_rid}"
+        )
+        _headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+            'Referer': 'https://live.douyin.com/',
+        }
+        if cookies:
+            _headers['Cookie'] = cookies
+        _req = _urllib_req.Request(_url, headers=_headers)
+        _resp = _urllib_req.urlopen(_req, timeout=8)
+        _raw = _resp.read()
+        if not _raw:
+            return None
+        _data = json.loads(_raw.decode('utf-8', errors='replace'))
+        _rd = _data.get('data', {})
+        if isinstance(_rd, dict):
+            _room_list = _rd.get('data', [])
+            if isinstance(_room_list, list) and _room_list:
+                _room = _room_list[0]
+                _status = int(_room.get('status', -1))
+                _has_commerce = bool(_room.get('has_commerce_goods', False))
+                return _status, _has_commerce, _room
+    except Exception:
+        pass
+    return None
+
+
+def _lightweight_room_status_checker():
+    """
+    轻量级房间状态检查器（独立线程，不依赖Playwright）。
+    每2分钟运行一次：
+    1. API验证在播房间：仅当API明确返回status=4时才标记已结束
+    2. 重开播检测：检查已结束的finished房间，若API返回status=2则标记回live
+    3. 带货验证：通过API的has_commerce_goods确认小黄车存在
+    """
+    import urllib.request as _urllib_req
+    print("  [StatusCheck] API房间状态检查器已启动 (每2分钟)", flush=True)
+
+    while True:
+        time.sleep(120)
+        try:
+            # Load cookies for API calls
+            _sc_cookies = _load_douyin_cookies()
+            if not _sc_cookies:
+                print("  [StatusCheck] 无法获取Cookie, 跳过本轮", flush=True)
+                continue
+
+            _sc_conn = _mysql_connect_retry(database=DB_NAME, max_retries=2, connect_timeout=10)
+            _sc_cur = _sc_conn.cursor(pymysql.cursors.DictCursor)
+
+            # ── Part 1: 验证在播房间（仅API确认status=4才标记结束）──
+            _sc_cur.execute(
+                "SELECT room_id_external, viewer_count FROM live_room "
+                "WHERE status='live' AND has_shopping_cart=1 AND deleted=0 "
+                "AND room_id_external IS NOT NULL AND room_id_external != '' "
+                "ORDER BY viewer_count ASC LIMIT 200"
+            )
+            _sc_live_rooms = _sc_cur.fetchall()
+
+            _sc_to_finish = []
+            _sc_api_ok = 0
+            _sc_api_err = 0
+            for _sc_r in _sc_live_rooms:
+                _sc_wr = str(_sc_r.get('room_id_external', ''))
+                if not _sc_wr:
+                    continue
+                result = _api_check_room_with_cookies(_sc_wr, _sc_cookies)
+                if result:
+                    _status, _has_commerce, _room_data = result
+                    _sc_api_ok += 1
+                    if _status == 4:
+                        _sc_to_finish.append(_sc_wr)
+                    elif _status == 2 and not _has_commerce:
+                        # 在播但没有小黄车，取消带货标记
+                        try:
+                            _sc_cur.execute(
+                                "UPDATE live_room SET has_shopping_cart=0 WHERE room_id_external=%s",
+                                (_sc_wr,)
+                            )
+                        except Exception:
+                            pass
+                else:
+                    _sc_api_err += 1
+                time.sleep(0.25)
+
+            # 批量标记结束
+            _sc_finished_count = 0
+            if _sc_to_finish:
+                for _sc_wr in list(set(_sc_to_finish)):
+                    try:
+                        _sc_cur.execute("UPDATE live_room SET status='finished' WHERE room_id_external=%s AND status='live'", (_sc_wr,))
+                        _sc_cur.execute("UPDATE rt_room_stats SET status='finished' WHERE room_id=%s", (_sc_wr,))
+                        _sc_finished_count += 1
+                    except Exception:
+                        pass
+                _sc_conn.commit()
+
+            # ── Part 2: 检测已结束房间是否重新开播 ──
+            _sc_cur.execute(
+                "SELECT room_id_external FROM live_room "
+                "WHERE status='finished' AND deleted=0 "
+                "AND room_id_external IS NOT NULL AND room_id_external != '' "
+                "ORDER BY last_verified DESC LIMIT 100"
+            )
+            _sc_finished_rooms = _sc_cur.fetchall()
+
+            _sc_restarted = []
+            _sc_restart_commerce = 0
+            for _sc_r in _sc_finished_rooms:
+                _sc_wr = str(_sc_r.get('room_id_external', ''))
+                if not _sc_wr:
+                    continue
+                result = _api_check_room_with_cookies(_sc_wr, _sc_cookies)
+                if result:
+                    _status, _has_commerce, _room_data = result
+                    if _status == 2 and _has_commerce:  # 重新开播且有购物车才标记为live
+                        _sc_restarted.append((_sc_wr, _room_data))
+                        _sc_restart_commerce += 1
+                time.sleep(0.25)
+
+            # 将重新开播的房间标记回live
+            _sc_restarted_count = 0
+            for _sc_wr, _sc_rdata in _sc_restarted:
+                try:
+                    _sc_title = (_sc_rdata.get('title', '') or '')[:100]
+                    _sc_nick = (_sc_rdata.get('owner', {}) or {}).get('nickname', '') or ''
+                    _sc_nick = _sc_nick[:50]
+                    _sc_viewers = _sc_rdata.get('user_count_str', '0') or '0'
+                    if '万' in str(_sc_viewers):
+                        _sc_vc = int(float(str(_sc_viewers).replace('万', '')) * 10000)
+                    else:
+                        _sc_vc = int(float(_sc_viewers)) if _sc_viewers else 0
+                    _sc_has_cart = 1 if _sc_rdata.get('has_commerce_goods') else 0
+
+                    _sc_cur.execute(
+                        "UPDATE live_room SET status='live', viewer_count=%s, "
+                        "room_name=%s, anchor_name=%s, has_shopping_cart=%s, "
+                        "last_verified=NOW(), start_time=NOW() "
+                        "WHERE room_id_external=%s",
+                        (_sc_vc, _sc_title, _sc_nick, _sc_has_cart, _sc_wr)
+                    )
+                    _sc_cur.execute(
+                        "INSERT INTO rt_room_stats (room_id, status, current_viewers) "
+                        "VALUES (%s, 'live', %s) "
+                        "ON DUPLICATE KEY UPDATE status='live', current_viewers=%s",
+                        (_sc_wr, _sc_vc, _sc_vc)
+                    )
+                    _sc_restarted_count += 1
+                except Exception:
+                    pass
+            if _sc_restarted:
+                _sc_conn.commit()
+
+            # 日志 - 查询当前live数量
+            _sc_live_count = 0
+            try:
+                _sc_cur.execute("SELECT COUNT(*) as cnt FROM live_room WHERE status='live' AND has_shopping_cart=1")
+                _sc_row = _sc_cur.fetchone()
+                _sc_live_count = _sc_row['cnt'] if isinstance(_sc_row, dict) else (_sc_row[0] if _sc_row else 0)
+            except Exception:
+                pass
+
+            _sc_cur.close()
+            _sc_conn.close()
+
+            _sc_log_parts = []
+            if _sc_finished_count > 0:
+                _sc_log_parts.append(f"结束{_sc_finished_count}个")
+            if _sc_restarted_count > 0:
+                _sc_log_parts.append(f"重开播{_sc_restarted_count}个(带货{_sc_restart_commerce})")
+            _sc_changes = ', '.join(_sc_log_parts) if _sc_log_parts else '无变化'
+            print(f"  [StatusCheck] {_sc_changes} | 当前live={_sc_live_count} "
+                  f"(API: live_chk={_sc_api_ok} fin_chk={len(_sc_finished_rooms)} "
+                  f"err={_sc_api_err})", flush=True)
+
+        except Exception as _sc_err:
+            if 'Unknown column' not in str(_sc_err):
+                print(f"  [StatusCheck] Error: {str(_sc_err)[:120]}", flush=True)
 
 
 def _auto_danmaku_collector():
@@ -2476,37 +3118,71 @@ def _auto_danmaku_collector():
             except Exception:
                 pass
 
-            # ── 第一阶段：先运行 scrape_rooms.py 发现房间（需要 Chrome） ──
-            # 必须等 scrape_rooms.py 的 Chrome 完全关闭后，再启动弹幕监控的 Chrome，
-            # 避免两个 Chrome 实例同时运行导致 VM 过载。
+            # ── 房间发现：通过 discovery_run.py 使用 CDP 真实加载页面检测小黄车 ──
+            # discovery_run.py 复用已有的 Chrome 125 CDP，不需要额外浏览器
             seen = set()
             rooms = []
+
+            # ── 智能跳过发现：DB已有足够带货直播间时直接进入监控，避免弹幕中断 ──
+            _skip_discovery = False
             try:
-                _scrape_script = os.path.join(BASE_DIR, 'scrape_rooms.py')
-                print("  [Danmaku] Running scrape_rooms.py to discover rooms with web_rid...")
-                _scrape_result = subprocess.run(
-                    [sys.executable, _scrape_script],
-                    capture_output=True, text=True, timeout=200,
-                    encoding='utf-8', errors='replace',
+                _chk_conn = _mysql_connect_retry(database=DB_NAME, max_retries=2, connect_timeout=10)
+                _chk_cur = _chk_conn.cursor(pymysql.cursors.DictCursor)
+                _chk_cur.execute(
+                    "SELECT COUNT(*) as cnt FROM live_room "
+                    "WHERE status='live' AND has_shopping_cart=1 AND deleted=0"
                 )
-                if _scrape_result.returncode == 0:
-                    _last_line = _scrape_result.stdout.strip().split(chr(10))[-1]
-                    _scrape_data = json.loads(_last_line)
-                    print(f"  [Danmaku] scrape_rooms.py completed: {_scrape_data}")
+                _live_cart_count = _chk_cur.fetchone()['cnt']
+                _chk_cur.close()
+                _chk_conn.close()
+                if _live_cart_count >= 30:
+                    _skip_discovery = True
+                    print(f"  [Danmaku] DB has {_live_cart_count} live rooms with cart (>= 30), "
+                          f"skipping discovery to maintain danmaku continuity", flush=True)
                 else:
-                    print(f"  [Danmaku] scrape_rooms.py failed: {_scrape_result.stderr[:150]}")
-            except Exception as e:
-                print(f"  [Danmaku] scrape_rooms.py error: {e}")
+                    print(f"  [Danmaku] DB has {_live_cart_count} live rooms with cart (< 30), "
+                          f"running discovery...", flush=True)
+            except Exception as _chk_err:
+                print(f"  [Danmaku] DB check failed: {_chk_err}, running discovery anyway", flush=True)
 
-            # 等待 scrape_rooms.py 的 Chrome 完全释放资源
-            print("  [Danmaku] Waiting 8s for Chrome resources to be released...")
-            await asyncio.sleep(8)
+            _disc_script = os.path.join(os.path.expanduser('~'), '.qoderworkcn',
+                                         'workspace', 'mresl2paqo3mxagl', 'discovery_run.py')
+            if not _skip_discovery and os.path.exists(_disc_script) and _cdp_port:
+                try:
+                    print("  [Danmaku] Running discovery_run.py (v8 CDP DOM verification)...")
+                    _disc_env = os.environ.copy()
+                    _disc_env['PYTHONUNBUFFERED'] = '1'
+                    _disc_result = subprocess.run(
+                        [sys.executable, '-u', _disc_script],
+                        capture_output=True, text=True, timeout=2400,
+                        encoding='utf-8', errors='replace',
+                        env=_disc_env,
+                    )
+                    if _disc_result.returncode == 0:
+                        _disc_out = _disc_result.stdout.strip()
+                        for _dl in _disc_out.split('\n'):
+                            if any(kw in _dl for kw in ('带货直播中', '完成', 'DOM验证通过', '最终', '写入', 'SUMMARY', '发现完成')):
+                                print(f"  [Danmaku] {_dl.strip()}", flush=True)
+                    else:
+                        _disc_err = _disc_result.stderr.strip()[:200] if _disc_result.stderr else ''
+                        print(f"  [Danmaku] discovery_run.py failed: {_disc_err}", flush=True)
+                except subprocess.TimeoutExpired:
+                    print("  [Danmaku] discovery_run.py timeout (2400s)", flush=True)
+                except Exception as e:
+                    print(f"  [Danmaku] discovery_run.py error: {e}", flush=True)
+            else:
+                print(f"  [Danmaku] Skipping discovery (script={'found' if os.path.exists(_disc_script) else 'missing'}, cdp={'yes' if _cdp_port else 'no'})")
 
-            # ── 第二阶段：启动弹幕监控的 Chrome（此时 scrape_rooms.py 的 Chrome 已关闭） ──
-            await crawler.init_browser()
+            await asyncio.sleep(2)
+
+            # ── 第二阶段：启动弹幕监控的浏览器 ──
+            await crawler.init_browser(cdp_port=_cdp_port)
 
             # 如果已有登录 Cookie，直接验证；否则简短等待登录
-            if _saved_login:
+            if _real_chrome:
+                logged_in = True
+                print("  [Danmaku] Using real Chrome — login status assumed OK")
+            elif _saved_login:
                 logged_in = await crawler._check_login_status()
                 if logged_in:
                     print("  [Danmaku] Login verified from saved cookies")
@@ -2628,7 +3304,7 @@ def _auto_danmaku_collector():
                                 var bodyText = document.body ? document.body.innerText : "";
                                 if (/购物车|去购物|去购买|正在卖|商品|下单|小黄车|讲解中/.test(bodyText)) return true;
                                 if (/福利|秒杀|抢购|限时|链接|点击购/.test(bodyText)) return true;
-                                var hasPrice = /[\u00a5￥]\s*\d+/.test(bodyText);
+                                var hasPrice = /[\\u00a5￥]\\s*\\d+/.test(bodyText);
                                 try {
                                     var chunks = window.__pace_f || [];
                                     for (var c = 0; c < chunks.length; c++) {
@@ -2771,23 +3447,20 @@ def _auto_danmaku_collector():
                     pass
 
                     urls = [
-                        'https://live.douyin.com',
-                        'https://live.douyin.com/category/100101',  # 美食
                         'https://live.douyin.com/category/100102',  # 服饰
-                        'https://live.douyin.com/category/100103',  # 美妆
+                        'https://live.douyin.com/category/100101',  # 美食
                         'https://live.douyin.com/category/100106',  # 数码
-                        'https://live.douyin.com/category/100105',  # 家居
-                        'https://live.douyin.com/category/100104',  # 母婴
-                        'https://live.douyin.com/category/100107',  # 运动
                     ]
                     for _url_idx, url in enumerate(urls):
+                        if _url_idx > 0:
+                            await asyncio.sleep(5)  # 页面间延迟防崩溃
                         try:
                             print(f"  [Discover] ({_url_idx+1}/{len(urls)}) Navigating to {url}...", flush=True)
                             await page.goto(url, wait_until='domcontentloaded', timeout=45000)
                             await page.wait_for_timeout(15000)
                             # 快速提取房间链接（滚动6次，每次1s）
                             _page_rids = set()
-                            for _scroll_i in range(12):
+                            for _scroll_i in range(6):
                                 try:
                                     await page.evaluate('window.scrollBy(0, 2000)')
                                     await page.wait_for_timeout(1000)
@@ -2894,30 +3567,47 @@ def _auto_danmaku_collector():
                     await page.close()
                 return discovered
 
-            # ── 房间预检：验证存活性 + 小黄车检测 ──
-            # 非无头模式下房间页面可正常加载（无 CAPTCHA），预检可行
-            # 每个周期都运行发现 — 从抖音直播广场持续发现新的带货直播间
-            print("  [Danmaku] Discovering fresh rooms from Douyin live pages...", flush=True)
-            try:
-                new_candidates = await _discover_live_from_douyin()
-                print(f"  [Discover] Discovered {len(new_candidates)} rooms from Douyin")
-                if new_candidates:
-                    _added = 0
-                    for _nr in new_candidates:
-                        if _nr.get('room_id') and _nr['room_id'] not in seen:
-                            seen.add(_nr['room_id'])
-                            rooms.append(_nr)
-                            _added += 1
-                    print(f"  [Discover] Added {_added} new rooms (total candidates: {len(rooms)})", flush=True)
-            except Exception as e:
-                print(f"  [Discover] Error: {e}")
+            # ── 房间发现：从抖音直播广场爬取当前正在直播的带货直播间 ──
+            # [DISABLED] discover_fresh 会创建额外 Playwright 页面，与 CDP 监控争夺 Chrome 资源导致崩溃
+            # DB 已有 1300+ 候选房间，直接用 API 验证即可
+            print("  [Danmaku] Skipping directory crawl (DB has sufficient candidates)", flush=True)
+            if False:  # disabled: discover_fresh competes with CDP for Chrome resources
+                from data_pipeline.discover_fresh import discover_live_commerce_rooms
+                _fresh = await discover_live_commerce_rooms(crawler, max_rooms=300, max_commerce=100)
+                print(f"  [Discover] Found {len(_fresh)} live commerce rooms from directory crawl", flush=True)
+                # Convert discover_fresh format to cluster format
+                _added = 0
+                for _fr in _fresh:
+                    _wr = str(_fr.get('web_rid', ''))
+                    if _wr and _wr not in seen:
+                        seen.add(_wr)
+                        rooms.append({
+                            'room_id': _wr,
+                            'web_rid': _wr,
+                            'room_name': _fr.get('title', f'抖音直播 {_wr}'),
+                            'anchor_name': _fr.get('nickname', ''),
+                            'viewer_count': 0,
+                            'live_url': f'https://live.douyin.com/{_wr}',
+                            'category': '带货',
+                            'has_commerce_goods': True,  # already verified
+                            'id_str': _fr.get('id_str', ''),
+                            'from_fresh': True,
+                        })
+                        _added += 1
+                print(f"  [Discover] Added {_added} fresh commerce rooms (total: {len(rooms)})", flush=True)
+            # except block removed — discover_fresh disabled
+
+            # 旧目录页发现已禁用 — discover_fresh 已验证直播状态+小黄车，无需旧方法补充
+            # （旧方法发现的多为已结束房间，浪费验证时间）
 
             if rooms:
-                # 跳过浏览器预检（慢且限制15个）— 全部交给签名API验证（500个，含小黄车检测）
+                # 优先使用新发现的真实带货直播间（已通过目录页+enter API双重验证）
+                _fresh_rooms = [r for r in rooms if r.get('from_fresh')]
+                _other_rooms = [r for r in rooms if not r.get('from_fresh')]
+                rooms = _fresh_rooms + _other_rooms
                 _db_count = sum(1 for r in rooms if r.get('from_db'))
-                _new_count = len(rooms) - _db_count
-                print(f"  [Danmaku] {len(rooms)} total candidates ({_db_count} from DB + {_new_count} discovered)", flush=True)
-                print(f"  [Danmaku] Skipping browser precheck — API verification handles cart + liveness", flush=True)
+                _fresh_count = len(_fresh_rooms)
+                print(f"  [Danmaku] {len(rooms)} total candidates ({_fresh_count} fresh commerce + {_db_count} from DB + {len(_other_rooms) - _db_count} other)", flush=True)
                 rooms = rooms[:500]
             else:
                 print("  [Danmaku] No rooms available, skipping danmaku collection")
@@ -3103,197 +3793,97 @@ def _auto_danmaku_collector():
                 print(f"  [Danmaku] Signing page creation failed: {_sp_err}", flush=True)
                 _signing_page = None
 
-            # ── 应用 internal room_id 映射 + 备用 web enter API 解析 ──
-            if _signing_page and rooms:
-                # 先用目录页 API 捕获的映射更新 room_id
-                _mapped_count = 0
+            # ── 创建签名页池：CDP stream 模式只需 1 个签名页（给 periodic verify 用）──
+            _signing_pages = []
+            if _signing_page:
+                _signing_pages.append(_signing_page)
+                _POOL_SIZE = 1  # CDP stream 不需要多签名页，节省内存
+                for _pi in range(1, _POOL_SIZE):
+                    try:
+                        _extra_page = await crawler._context.new_page()
+                        await _extra_page.goto('https://live.douyin.com/', timeout=30000, wait_until='domcontentloaded')
+                        await asyncio.sleep(5)
+                        _has_ac = await _extra_page.evaluate("typeof window.byted_acrawler !== 'undefined'")
+                        if _has_ac:
+                            _signing_pages.append(_extra_page)
+                            print(f"  [Danmaku] Signing page pool #{_pi+1} ready")
+                        else:
+                            print(f"  [Danmaku] Signing page pool #{_pi+1}: byted_acrawler not found, skipping")
+                            await _extra_page.close()
+                    except Exception as _pool_err:
+                        print(f"  [Danmaku] Signing page pool #{_pi+1} failed: {_pool_err}")
+                print(f"  [Danmaku] Signing page pool: {len(_signing_pages)} pages ready")
+
+            # ── 从 DB 选取 DOM 验证过的带货直播间用于弹幕监控 ──
+            # discovery_run.py 已通过 CDP 真实加载页面 + 小黄车 DOM 检测验证过这些房间
+            _verified_rooms = []
+            try:
+                _sel_conn = _mysql_connect_retry(database=DB_NAME, max_retries=2, connect_timeout=10)
+                _sel_cur = _sel_conn.cursor(pymysql.cursors.DictCursor)
+                _sel_cur.execute(
+                    "SELECT room_id_external, room_name, anchor_name, viewer_count, "
+                    "live_url, category FROM live_room "
+                    "WHERE status='live' AND has_shopping_cart=1 AND data_source='real' "
+                    "AND deleted=0 AND room_id_external IS NOT NULL AND room_id_external != '' "
+                    "ORDER BY viewer_count DESC"
+                )
+                _verified = _sel_cur.fetchall()
+                _sel_cur.close()
+                _sel_conn.close()
+
+                _seen_wr = set()
+                for _vr in _verified:
+                    _wr = str(_vr.get('room_id_external', ''))
+                    if _wr and _wr not in _seen_wr:
+                        _seen_wr.add(_wr)
+                        _verified_rooms.append({
+                            'room_id': _wr,
+                            'web_rid': _wr,
+                            'room_name': _vr.get('room_name', ''),
+                            'anchor_name': _vr.get('anchor_name', ''),
+                            'viewer_count': int(_vr.get('viewer_count', 0)),
+                            'live_url': _vr.get('live_url', '') or f'https://live.douyin.com/{_wr}',
+                            'category': _vr.get('category', '带货'),
+                            'has_commerce_goods': True,
+                            'api_status': 2,
+                        })
+                print(f"  [Danmaku] Selected {len(_verified_rooms)} DOM-verified commerce rooms for CDP monitoring", flush=True)
+            except Exception as _sel_err:
+                print(f"  [Danmaku] Failed to query verified rooms: {_sel_err}", flush=True)
+
+            if _verified_rooms:
+                rooms = _verified_rooms  # 全部房间进入滚动窗口监控
+            elif rooms:
+                # fallback: use in-memory candidates if DB query returned nothing
+                _rand.shuffle(rooms)
+                rooms = rooms[:10]
                 for _r in rooms:
-                    _wr = str(_r.get('room_id', ''))
-                    if _wr in _signing_room_map:
-                        _r['room_id'] = _signing_room_map[_wr]
-                        _r['web_rid'] = _wr  # 保留 web_rid 用于显示和 URL
-                        _mapped_count += 1
-                if _mapped_count:
-                    print(f"  [Danmaku] Applied {len(_signing_room_map)} API mappings, updated {_mapped_count} rooms", flush=True)
+                    _r['has_commerce_goods'] = True
+                    _r['api_status'] = 2
+                print(f"  [Danmaku] Fallback: selected {len(rooms)} unverified rooms for monitoring", flush=True)
+            else:
+                print("  [Danmaku] No rooms available for monitoring", flush=True)
 
-                # 所有房间都需要通过 web enter API 验证直播状态和小黄车
-                # （目录页映射不包含 has_commerce_goods 信息）
-                _unchecked = [_r for _r in rooms if 'has_commerce_goods' not in _r]
-                if _unchecked:
-                    _resolve_limit = min(len(_unchecked), 500)  # 全平台验证带货直播间
-                    print(f"  [Danmaku] Checking {_resolve_limit} rooms via signed web enter API (live status + cart)...", flush=True)
-                    for _r in _unchecked[:_resolve_limit]:
-                        _web_rid = str(_r.get('web_rid', '') or _r.get('room_id', ''))
-                        try:
-                            _api_result = await _signing_page.evaluate("""async (webRid) => {
-                                try {
-                                    // 先用 frontierSign 签名 URL
-                                    let url = 'https://live.douyin.com/webcast/room/web/enter/?aid=6383&app_name=douyin_web&live_id=1&device_platform=web&enter_from=web_live&web_rid=' + webRid;
-                                    if (typeof window.byted_acrawler !== 'undefined' &&
-                                        typeof window.byted_acrawler.frontierSign === 'function') {
-                                        const signResult = await window.byted_acrawler.frontierSign(url);
-                                        if (typeof signResult === 'string') {
-                                            url = signResult;
-                                        } else if (signResult && signResult['X-Bogus']) {
-                                            url = url + '&X-Bogus=' + signResult['X-Bogus'];
-                                        }
-                                    }
-                                    const resp = await fetch(url, { credentials: 'include' });
-                                    if (!resp.ok) return { error: 'HTTP ' + resp.status };
-                                    const text = await resp.text();
-                                    if (!text) return { error: 'empty body' };
-                                    const data = JSON.parse(text);
-                                    let roomData = data.data;
-                                    const _dbg = {
-                                        topKeys: Object.keys(data),
-                                        dataType: Array.isArray(data.data) ? 'array(' + (data.data ? data.data.length : 0) + ')' : typeof data.data,
-                                        statusCode: data.status_code,
-                                    };
-                                    if (Array.isArray(roomData) && roomData.length > 0) {
-                                        roomData = roomData[0];
-                                        _dbg.firstKeys = Object.keys(roomData);
-                                        _dbg.firstStatus = roomData.status;
-                                        _dbg.firstStatusStr = roomData.status_str;
-                                    } else if (roomData && typeof roomData === 'object' && !Array.isArray(roomData)) {
-                                        _dbg.dataKeys = Object.keys(roomData).slice(0, 15);
-                                        _dbg.dataStatus = roomData.status;
-                                        // Check if room data is nested in data.data.data or data.data[0]
-                                        if (roomData.data && typeof roomData.data === 'object') {
-                                            _dbg.innerType = Array.isArray(roomData.data) ? 'array(' + roomData.data.length + ')' : typeof roomData.data;
-                                            if (Array.isArray(roomData.data) && roomData.data.length > 0) {
-                                                _dbg.innerKeys = Object.keys(roomData.data[0]).slice(0, 15);
-                                                roomData = roomData.data[0];
-                                            } else if (!Array.isArray(roomData.data)) {
-                                                _dbg.innerKeys = Object.keys(roomData.data).slice(0, 15);
-                                                roomData = roomData.data;
-                                            }
-                                        }
-                                    }
-                                    if (roomData && typeof roomData === 'object') {
-                                        const idStr = roomData.id_str || roomData.id || '';
-                                        const inner = roomData.room || roomData.data || {};
-                                        const innerId = inner.id_str || inner.id || '';
-                                        const statusVal = roomData.status !== undefined ? roomData.status : (inner.status !== undefined ? inner.status : -1);
-                                        // 检测小黄车（购物车）：has_commerce_goods 字段
-                                        const hasCart = !!(roomData.has_commerce_goods || inner.has_commerce_goods
-                                            || roomData.has_shopping_cart || inner.has_shopping_cart);
-                                        _dbg.resolvedStatus = statusVal;
-                                        _dbg.title = roomData.title;
-                                        _dbg.hasCommerceGoods = hasCart;
-                                        return {
-                                            id_str: String(idStr || innerId || ''),
-                                            web_rid: roomData.web_rid || webRid,
-                                            title: (roomData.title || '').substring(0, 50),
-                                            status: parseInt(statusVal),
-                                            has_commerce_goods: hasCart,
-                                            user_count_str: roomData.user_count_str || '0',
-                                            _debug: _dbg,
-                                        };
-                                    }
-                                    _dbg.roomDataNull = roomData === null;
-                                    return { error: 'unexpected data type', _debug: _dbg };
-                                } catch(e) {
-                                    return { error: e.message };
-                                }
-                            }""", _web_rid)
-                            # 捕获API返回的status和web_rid到房间字典
-                            if _api_result and not _api_result.get('error'):
-                                _r['web_rid'] = _web_rid
-                                _api_status_val = _api_result.get('status', -1)
-                                _r['api_status'] = int(_api_status_val) if _api_status_val is not None else -1
-                                # 捕获小黄车（购物车）状态
-                                _r['has_commerce_goods'] = bool(_api_result.get('has_commerce_goods', False))
-                                # Debug: print raw API response structure for first room
-                                if _api_result.get('_debug'):
-                                    print(f"  [Danmaku-Debug] {_web_rid}: {_api_result['_debug']}", flush=True)
-                                if _api_result.get('id_str') and _api_result['id_str'] != _web_rid:
-                                    _r['room_id'] = _api_result['id_str']
-                                _status_label = {2: 'LIVE', 4: 'ENDED'}.get(_r['api_status'], f'status={_r["api_status"]}')
-                                _cart_label = '🛒' if _r.get('has_commerce_goods') else '❌无车'
-                                print(f"  [Danmaku] Room {_web_rid} -> {_status_label} {_cart_label}"
-                                      f" (title={_api_result.get('title','?')[:20]})", flush=True)
-                            elif _api_result and _api_result.get('error'):
-                                _r['api_status'] = -1  # API错误，状态未知
-                                print(f"  [Danmaku] Room {_web_rid} API error: {_api_result['error']}", flush=True)
-                            else:
-                                _r['api_status'] = -1
-                                print(f"  [Danmaku] Room {_web_rid} -> no data", flush=True)
-                        except Exception as _api_err:
-                            _r['api_status'] = -1
-                            print(f"  [Danmaku] Room {_web_rid} resolve error: {_api_err}", flush=True)
-                        await asyncio.sleep(0.12)
-
-                    # ── 关键过滤：只保留API确认为直播中(status=2)的房间 ──
-                    _live_rooms = [r for r in rooms if r.get('api_status') == 2]
-                    _ended_rooms = [r for r in rooms if r.get('api_status') == 4]
-                    _unknown_rooms = [r for r in rooms if r.get('api_status', -1) not in (2, 4)]
-                    print(f"  [Danmaku] API check result: {len(_live_rooms)} live, "
-                          f"{len(_ended_rooms)} ended, {len(_unknown_rooms)} unknown", flush=True)
-
-                    # ── 立即更新DB：已结束的房间标记为finished ──
-                    if _ended_rooms:
-                        try:
-                            _end_conn = _mysql_connect_retry(database=DB_NAME, max_retries=2, connect_timeout=10)
-                            _end_cur = _end_conn.cursor()
-                            for _r in _ended_rooms:
-                                _wr = str(_r.get('web_rid', '') or _r.get('room_id', ''))
-                                if _wr:
-                                    _end_cur.execute(
-                                        "UPDATE live_room SET status='finished' "
-                                        "WHERE room_id_external=%s", (_wr,))
-                                    _end_cur.execute(
-                                        "UPDATE rt_room_stats SET status='finished' "
-                                        "WHERE room_id=%s", (_wr,))
-                            _end_conn.commit()
-                            _end_cur.close()
-                            _end_conn.close()
-                            print(f"  [Danmaku] 已标记 {len(_ended_rooms)} 个结束房间为 finished", flush=True)
-                        except Exception as _end_err:
-                            print(f"  [Danmaku] 结束房间标记失败: {_end_err}", flush=True)
-
-                    if _live_rooms:
-                        rooms = _live_rooms  # 只保留正在直播的房间
-                    else:
-                        print("  [Danmaku] WARNING: No live rooms found via API, using all candidates", flush=True)
-
-                    # ── 小黄车过滤：只保留有购物车的带货直播间 ──
-                    _cart_rooms = [r for r in rooms if r.get('has_commerce_goods')]
-                    _no_cart_rooms = [r for r in rooms if not r.get('has_commerce_goods')]
-                    print(f"  [Danmaku] 购物车检查: {len(_cart_rooms)} 有购物车, "
-                          f"{len(_no_cart_rooms)} 无购物车", flush=True)
-                    if _cart_rooms:
-                        rooms = _cart_rooms
-                        print(f"  [Danmaku] ✅ 只保留 {len(rooms)} 个带货直播间", flush=True)
-                        for _r in rooms:
-                            _wr = _r.get('web_rid', _r.get('room_id', '?'))
-                            print(f"    🛒 {_wr}: {_r.get('anchor_name', _r.get('title', '?'))[:25]}", flush=True)
-                    else:
-                        rooms = []  # 没有带货直播间，清空列表不监控
-                        print("  [Danmaku] ⚠️ 没有发现带货直播间！所有直播间均无小黄车，跳过监控", flush=True)
-                        for _r in _no_cart_rooms[:5]:
-                            _wr = _r.get('web_rid', _r.get('room_id', '?'))
-                            print(f"    ❌ {_wr}: {_r.get('anchor_name', _r.get('title', '?'))[:25]}", flush=True)
-
-                    # ── 标记最终确认的带货直播间为 live（同时满足：直播中+有购物车）──
-                    if rooms:
-                        try:
-                            _final_conn = _mysql_connect_retry(database=DB_NAME, max_retries=2, connect_timeout=10)
-                            _final_cur = _final_conn.cursor()
-                            for _r in rooms:
-                                _wr = str(_r.get('web_rid', '') or _r.get('room_id', ''))
-                                if _wr:
-                                    _final_cur.execute(
-                                        "UPDATE live_room SET status='live', has_shopping_cart=1 "
-                                        "WHERE room_id_external=%s", (_wr,))
-                                    _final_cur.execute(
-                                        "UPDATE rt_room_stats SET status='live' "
-                                        "WHERE room_id=%s", (_wr,))
-                            _final_conn.commit()
-                            _final_cur.close()
-                            _final_conn.close()
-                            print(f"  [Danmaku] 已标记 {len(rooms)} 个带货直播间为 live", flush=True)
-                        except Exception as _final_err:
-                            print(f"  [Danmaku] 带货直播间标记失败: {_final_err}", flush=True)
+            # Mark selected rooms as live in DB
+            if rooms:
+                try:
+                    _final_conn = _mysql_connect_retry(database=DB_NAME, max_retries=2, connect_timeout=10)
+                    _final_cur = _final_conn.cursor()
+                    for _r in rooms:
+                        _wr = str(_r.get('web_rid', '') or _r.get('room_id', ''))
+                        if _wr:
+                            _final_cur.execute(
+                                "UPDATE live_room SET status='live', has_shopping_cart=1 "
+                                "WHERE room_id_external=%s", (_wr,))
+                            _final_cur.execute(
+                                "UPDATE rt_room_stats SET status='live' "
+                                "WHERE room_id=%s", (_wr,))
+                    _final_conn.commit()
+                    _final_cur.close()
+                    _final_conn.close()
+                    print(f"  [Danmaku] Marked {len(rooms)} rooms as live in DB", flush=True)
+                except Exception as _final_err:
+                    print(f"  [Danmaku] DB mark failed: {_final_err}", flush=True)
 
             # 启动弹幕监控（并发监控多个房间）—— 抖音弹幕不需要登录即可接收
             if not logged_in:
@@ -3329,7 +3919,7 @@ def _auto_danmaku_collector():
             _stats_thread = _thd.Thread(target=_print_dm_stats, daemon=True)
             _stats_thread.start()
 
-            async def monitor_one(crawler_instance, room, idx, total, signing_page=None):
+            async def monitor_one(crawler_instance, room, idx, total, signing_page=None, signing_lock=None):
                 # 优先使用 web_rid（抖音房间页 URL 需要 web_rid，不是 internal_id）
                 rid = str(room.get('web_rid', '') or room.get('room_id', ''))
                 name = room.get('anchor_name', room.get('room_name', '?'))
@@ -3404,24 +3994,36 @@ def _auto_danmaku_collector():
                             'content': mapped.get('content', ''),
                             'danmaku_type': msg_type,
                         })
-                        # 缓冲区上限 500 条，防止内存溢出
-                        if len(_dm_buffer) > 500:
-                            del _dm_buffer[:200]
+                        # 缓冲区上限 1500 条（20s flush间隔需要更大缓冲）
+                        if len(_dm_buffer) > 1500:
+                            del _dm_buffer[:500]
 
                 try:
-                    await crawler_instance.run_room_monitor(
-                        rid, on_danmaku,
+                    # ── CDP 被动拦截模式 ──
+                    # 让浏览器原生JS建立WebSocket，CDP网络层被动截帧
+                    # 完全绕开DEVICE_BLOCKED（因为是页面自己的WS连接）
+                    print(f"  [Danmaku-CDP] {name}: 启动CDP弹幕流 "
+                          f"(web_rid={rid}, duration=180s)")
+                    await crawler_instance.start_danmaku_stream(
+                        room_id=rid,
+                        callback=on_danmaku,
+                        duration=180,
                         shared_context=crawler_instance._context,
-                        signing_page=signing_page,
                     )
+                    # ── 流结束后记录弹幕统计（不直接标记房间状态，由API状态检查器处理）──
+                    _dm_count = _dm_counter.get(rid, 0)
+                    if _dm_count == 0:
+                        print(f"  [Danmaku] {rid}: 0条弹幕 (API状态检查器将确认是否已结束)", flush=True)
+                    else:
+                        print(f"  [Danmaku] {rid}: 收到{_dm_count}条弹幕", flush=True)
                 except Exception as e:
                     print(f"  [Danmaku] Monitor error for {rid}: {e}")
 
             # ── 定时刷入 MySQL ──
             def _flush_danmaku_to_mysql():
-                """每 8 秒把内存中的弹幕计数刷入 MySQL + 批量写入 rt_danmaku"""
+                """每 20 秒把内存中的弹幕计数刷入 MySQL + 批量写入 rt_danmaku"""
                 while True:
-                    time.sleep(8)
+                    time.sleep(20)
                     try:
                         # ── 1. 刷入弹幕计数器到 rt_room_stats ──
                         with _dm_lock:
@@ -3429,6 +4031,7 @@ def _auto_danmaku_collector():
                                 counter_snapshot = {}
                             else:
                                 counter_snapshot = dict(_dm_counter)
+                                _dm_counter.clear()  # 重置计数器，防止重复累加
 
                             # ── 2. 取出弹幕缓冲区快照 ──
                             if _dm_buffer:
@@ -3474,34 +4077,31 @@ def _auto_danmaku_collector():
             _flush_thread.start()
             print("  [Danmaku] MySQL flush thread started (every 8s)")
 
-            # ── 关键修复：清理干扰页面，确保 CDP 被动截帧正常工作 ──
-            # 诊断发现：standalone 测试（单页面）WS 正常，但集群（多页面）WS 不建立。
-            # 原因：signing page (live.douyin.com/) 和 main page (douyin.com) 同时打开
-            # 会干扰房间页面的原生 WebSocket 建立。
-            # CDP 被动模式不需要 signing page，因此关闭它；主页面导航到 about:blank。
-            if _signing_page:
-                try:
-                    await _signing_page.close()
-                    print("  [Cleanup] Closed signing page", flush=True)
-                except Exception:
-                    pass
-                _signing_page = None  # 置空，防止后续引用
-            # 将主页面导航到 about:blank（不关闭，保持 context 存活）
-            if crawler._page:
-                try:
-                    await crawler._page.goto("about:blank", timeout=5000)
-                    print("  [Cleanup] Navigated main page to about:blank", flush=True)
-                except Exception:
-                    pass
-            # 关闭其他多余的页面（如之前残留的页面）
-            _kept = {crawler._page}  # 保留主页面
+            # ── 保持 signing page 存活（直连WS模式需要它为每个房间签名WebSocket URL）──
+            # CDP模式不需要signing page，但直连WS模式需要 frontierSign
+            # 仅清理多余的干扰页面，保留 signing page 和主页面
+            # ── 激进清理：关闭所有多余页面，但始终保留至少1个页面（Chrome关闭条件=0 tabs）──
+            _kept = set()
+            if _signing_pages:
+                _kept.add(_signing_pages[0])  # 保留签名页
+            else:
+                # 签名页创建失败时，保留第一个可用页面防止Chrome退出
+                _all_pages = list(crawler._context.pages)
+                if _all_pages:
+                    _kept.add(_all_pages[0])
             for p in list(crawler._context.pages):
                 if p not in _kept:
                     try:
                         await p.close()
-                        print(f"  [Cleanup] Closed extra page: {p.url[:50]}", flush=True)
+                        print(f"  [Cleanup] Closed page: {p.url[:50]}", flush=True)
                     except Exception:
                         pass
+            # 把保留的页面导航到 about:blank 释放资源
+            for _kp in _kept:
+                try:
+                    await _kp.goto("about:blank", timeout=5000)
+                except Exception:
+                    pass
             await asyncio.sleep(2)
             _page_count = len(crawler._context.pages)
             print(f"  [Cleanup] Done. {_page_count} page(s) remaining, ready for CDP", flush=True)
@@ -3517,38 +4117,122 @@ def _auto_danmaku_collector():
                 _fresh = [r for r in rooms if not r.get(_monitored_key)]
                 _prev = [r for r in rooms if r.get(_monitored_key)]
                 rooms = _fresh + _prev
-                _monitor_rooms = rooms[:32]  # 并发监控32个房间的CDP弹幕
+                _monitor_rooms = rooms  # 全部房间顺序批次处理
                 for r in _monitor_rooms:
                     r[_monitored_key] = True
-                for i, r in enumerate(_monitor_rooms):
-                    t = asyncio.create_task(monitor_one(crawler, r, i, len(_monitor_rooms), signing_page=_signing_page))
-                    tasks.append(t)
-                    if i < len(_monitor_rooms) - 1:
-                        await asyncio.sleep(2)
-                print(f"  [Danmaku] Started {len(tasks)}/{len(rooms)} room monitors (max 32 concurrent, rotated)")
+                print(f"  [Danmaku] Will monitor {len(_monitor_rooms)} rooms in sequential batches of 4 "
+                      f"(180s/stream, 10s stagger, VM-safe)", flush=True)
                 # 监控循环：每5秒检查刷新信号，25分钟自动重启轮换
+                # ── 定期重新验证直播状态（每2分钟）──
+                # 在监控期间快速捕获已结束的房间，从"正在直播"列表中移除
+                _verify_sp = _signing_pages[0] if _signing_pages else _signing_page
+                async def _periodic_verify():
+                    while True:
+                        await asyncio.sleep(120)
+                        try:
+                            _v_conn = _mysql_connect_retry(database=DB_NAME, max_retries=2, connect_timeout=10)
+                            _v_cur = _v_conn.cursor(pymysql.cursors.DictCursor)
+                            _v_cur.execute("SELECT room_id_external FROM live_room WHERE status='live' AND has_shopping_cart=1 LIMIT 200")
+                            _v_rooms = _v_cur.fetchall()
+                            _v_cur.close()
+                            _v_conn.close()
+                            _v_ended = 0
+                            for _vr in _v_rooms:
+                                _wr = str(_vr.get('room_id_external', ''))
+                                if not _wr:
+                                    continue
+                                try:
+                                    _vr_result = await asyncio.wait_for(_verify_sp.evaluate("""async (webRid) => {
+                                        try {
+                                            let url = 'https://live.douyin.com/webcast/room/web/enter/?aid=6383&app_name=douyin_web&live_id=1&device_platform=web&enter_from=web_live&web_rid=' + webRid;
+                                            if (typeof window.byted_acrawler !== 'undefined' && typeof window.byted_acrawler.frontierSign === 'function') {
+                                                const s = await window.byted_acrawler.frontierSign(url);
+                                                if (typeof s === 'string') url = s;
+                                                else if (s && s['X-Bogus']) url += '&X-Bogus=' + s['X-Bogus'];
+                                            }
+                                            const r = await fetch(url, {credentials:'include'});
+                                            if (!r.ok) return {error:'HTTP '+r.status};
+                                            const d = JSON.parse(await r.text());
+                                            let rd = d.data;
+                                            if (Array.isArray(rd) && rd.length > 0) rd = rd[0];
+                                            else if (rd && rd.data && Array.isArray(rd.data) && rd.data.length > 0) rd = rd.data[0];
+                                            return {status: rd ? (rd.status !== undefined ? parseInt(rd.status) : -1) : -1};
+                                        } catch(e) { return {error: e.message}; }
+                                    }""", _wr), timeout=15)
+                                except Exception:
+                                    continue
+                                if _vr_result and _vr_result.get('status') == 4:
+                                    _v_ended += 1
+                                    try:
+                                        _ve_conn = _mysql_connect_retry(database=DB_NAME, max_retries=1, connect_timeout=5)
+                                        _ve_cur = _ve_conn.cursor()
+                                        _ve_cur.execute("UPDATE live_room SET status='finished' WHERE room_id_external=%s", (_wr,))
+                                        _ve_cur.execute("UPDATE rt_room_stats SET status='finished' WHERE room_id=%s", (_wr,))
+                                        _ve_conn.commit()
+                                        _ve_cur.close()
+                                        _ve_conn.close()
+                                    except:
+                                        pass
+                                await asyncio.sleep(0.15)
+                            if _v_ended > 0:
+                                print(f"  [QuickVerify] 发现 {_v_ended} 个已结束房间，已从直播列表移除", flush=True)
+                        except Exception as _pv_err:
+                            if 'destroyed' not in str(_pv_err) and 'closed' not in str(_pv_err):
+                                pass  # 静默忽略非致命错误
+
+                _verify_task = asyncio.create_task(_periodic_verify())
+
                 _restart_sig = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.refresh_restart.flag')
                 _cycle_start = time.time()
-                _cycle_timeout = 1500  # 25分钟自动重启
-                while any(not t.done() for t in tasks):
-                    await asyncio.sleep(5)
+                _cycle_timeout = 5400  # 90分钟自动重启
+                _batch_done = False
+
+                # ── 顺序批次处理：每批4个房间，完成后再启动下一批 ──
+                for _batch_i in range(0, len(_monitor_rooms), 4):
+                    # 超时检查
                     if time.time() - _cycle_start > _cycle_timeout:
-                        print(f"  [Danmaku] Cycle timeout ({_cycle_timeout}s) — rotating rooms", flush=True)
-                        for t in tasks:
-                            if not t.done():
-                                t.cancel()
-                        await asyncio.sleep(1)
+                        print(f"  [Danmaku] Cycle timeout ({_cycle_timeout}s) — restarting", flush=True)
                         break
+                    # 刷新信号检查
                     if os.path.exists(_restart_sig):
                         print("  [Danmaku] Refresh signal detected — restarting cycle", flush=True)
                         try: os.remove(_restart_sig)
                         except: pass
-                        for t in tasks:
-                            if not t.done():
-                                t.cancel()
-                        await asyncio.sleep(1)
                         break
-                await asyncio.gather(*tasks, return_exceptions=True)
+
+                    _batch = _monitor_rooms[_batch_i:_batch_i + 4]
+                    _batch_tasks = []
+                    for _bi, _br in enumerate(_batch):
+                        _global_idx = _batch_i + _bi + 1
+                        async def _staggered_mon(r=_br, idx=_global_idx):
+                            await asyncio.sleep(_bi * 10)  # 10s stagger within batch
+                            await monitor_one(crawler, r, idx, len(_monitor_rooms))
+                        _bt = asyncio.create_task(_staggered_mon())
+                        _batch_tasks.append(_bt)
+
+                    _batch_num = _batch_i // 4 + 1
+                    _total_batches = (len(_monitor_rooms) + 3) // 4
+                    _rids = [r.get('web_rid', r.get('room_id', '?')) for r in _batch]
+                    print(f"  [Batch {_batch_num}/{_total_batches}] "
+                          f"Rooms: {', '.join(str(x) for x in _rids)}", flush=True)
+
+                    # 等待本批4个任务全部完成
+                    await asyncio.gather(*_batch_tasks, return_exceptions=True)
+                    tasks.extend(_batch_tasks)  # keep reference for final cleanup
+
+                    # 批次间短暂休息，让 Chrome 释放资源
+                    await asyncio.sleep(3)
+
+                _batch_done = True
+                _dm_total = sum(_dm_type_stats.values()) if _dm_type_stats else 0
+                print(f"  [Danmaku] All batches complete. Total danmaku this cycle: {_dm_total}", flush=True)
+
+                # 取消定期验证任务
+                _verify_task.cancel()
+                try:
+                    await _verify_task
+                except asyncio.CancelledError:
+                    pass
 
         except Exception as e:
             print(f"  [Danmaku] Collector error: {e}")
@@ -3573,11 +4257,15 @@ def _auto_danmaku_collector():
                 loop.close()
             except:
                 pass
-        # 清理可能残留的 Chrome 进程，避免 profile 锁定
+        # 清理可能残留的 Chrome 125 进程（仅 chrome-win64，不影响用户系统 Chrome）
         try:
             import subprocess as _sp
-            _sp.run(['taskkill', '/F', '/IM', 'chrome.exe', '/T'],
-                    capture_output=True, timeout=10)
+            _sp.run(
+                ['powershell', '-Command',
+                 'Get-Process chrome -ErrorAction SilentlyContinue | '
+                 'Where-Object { $_.Path -like "*chrome-win64*" } | '
+                 'Stop-Process -Force -ErrorAction SilentlyContinue'],
+                capture_output=True, timeout=10)
         except Exception:
             pass
         print("  [Danmaku] Waiting 5s before restarting monitors...")
@@ -3626,19 +4314,104 @@ def _kill_ports():
                         pass
     except Exception as e:
         print(f"  [Cleanup] Port scan failed: {e}")
-    # 同时清理 Chrome（避免 profile 锁定）
-    try:
-        subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe', '/T'],
-                       capture_output=True, timeout=5)
-    except Exception:
-        pass
     if killed:
         time.sleep(2)  # 等待端口释放
 
 
+# === Chrome 125 for Testing (CDP 模式) ===
+_CHROME125_EXE = r"C:\Users\MECHREVO\chrome125\chrome-win64\chrome.exe"
+_CHROME125_PROFILE = r"C:\Users\MECHREVO\chrome125\profile_fresh"
+_CDP_PORT = 9225
+
+def _launch_chrome125():
+    """启动 Chrome 125 for Testing 并等待 CDP 端口就绪。始终强制重启以确保干净状态。"""
+    import urllib.request
+
+    # 0. 始终先杀掉残留 Chrome 125，确保干净的 DNS 和网络状态
+    print("  [Chrome125] Cleaning up stale Chrome 125 processes ...")
+    try:
+        _ps = subprocess.run(
+            ['powershell', '-Command',
+             'Get-Process chrome -ErrorAction SilentlyContinue | '
+             'Where-Object { $_.Path -like "*chrome-win64*" } | '
+             'Stop-Process -Force -ErrorAction SilentlyContinue'],
+            capture_output=True, timeout=10)
+    except Exception:
+        pass
+    time.sleep(2)
+
+    # 2. 清理 profile lockfile（防止锁冲突）
+    for lock_name in ['SingletonLock', 'lockfile']:
+        lock_path = os.path.join(_CHROME125_PROFILE, lock_name)
+        try:
+            if os.path.exists(lock_path):
+                os.remove(lock_path)
+                print(f"  [Chrome125] Removed stale {lock_name}")
+        except Exception:
+            pass
+
+    # 3. 启动 Chrome 125
+    if not os.path.isfile(_CHROME125_EXE):
+        print(f"  [Chrome125] ERROR: Chrome 125 not found at {_CHROME125_EXE}")
+        return False
+
+    _danmaku_ext = r"C:\Users\MECHREVO\chrome125\danmaku_ext"
+    chrome_args = [
+        _CHROME125_EXE,
+        f"--remote-debugging-port={_CDP_PORT}",
+        "--remote-allow-origins=*",
+        "--no-first-run",
+        "--no-default-browser-check",
+        f"--load-extension={_danmaku_ext}",
+        "--disable-popup-blocking",
+        "--disable-translate",
+        "--disk-cache-size=0",
+        f"--user-data-dir={_CHROME125_PROFILE}",
+        "about:blank",
+    ]
+    print(f"  [Chrome125] Launching Chrome 125 (CDP port {_CDP_PORT}) ...")
+    try:
+        proc = subprocess.Popen(chrome_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"  [Chrome125] Chrome PID: {proc.pid}")
+    except Exception as e:
+        print(f"  [Chrome125] Launch failed: {e}")
+        return False
+
+    # 4. 等待 CDP 端口就绪
+    print(f"  [Chrome125] Waiting for CDP port {_CDP_PORT} ...")
+    for i in range(30):
+        time.sleep(1)
+        try:
+            resp = urllib.request.urlopen(f"http://localhost:{_CDP_PORT}/json/version", timeout=2)
+            data = resp.read().decode()
+            if 'Browser' in data:
+                import json as _json
+                info = _json.loads(data)
+                browser = info.get('Browser', '?')
+                print(f"  [Chrome125] CDP ready! {browser}")
+                return True
+        except Exception:
+            pass
+    print(f"  [Chrome125] ERROR: CDP port {_CDP_PORT} not ready after 30s")
+    return False
+
+
 def main():
-    # 清理残留进程
-    _kill_ports()
+    global _real_chrome, _cdp_port
+
+    # ── 始终使用 Chrome 125 CDP 模式 ──
+    # Chrome 125 for Testing 解决了 Chrome 150 的 exitCode=21 崩溃问题
+    # 并且真实 Chrome 的设备指纹可以绕过抖音 DEVICE_BLOCKED 检测
+    print("  [Startup] Launching Chrome 125 for Testing ...")
+    if not _launch_chrome125():
+        print("  [ERROR] Chrome 125 launch failed! Falling back to Playwright Chromium (no real danmaku)")
+        _real_chrome = False
+        _cdp_port = None
+        _kill_ports()
+    else:
+        _real_chrome = True
+        _cdp_port = _CDP_PORT
+        print("  [OK] Chrome 125 CDP mode active")
     
     print("=" * 70)
     print("  StarCast StarCast Live Commerce Big Data Platform - Cluster Edition")
@@ -3707,15 +4480,15 @@ def main():
     danmaku_thread = threading.Thread(target=_auto_danmaku_collector, daemon=True)
     danmaku_thread.start()
 
-    # === 房间状态检查: 每20分钟刷新直播间列表，标记已结束的房间 ===
-    status_thread = threading.Thread(target=_room_status_checker, daemon=True)
+    # === 房间状态检查: 轻量级检查器（不依赖Playwright，通过弹幕活跃度+API检测已结束房间）===
+    status_thread = threading.Thread(target=_lightweight_room_status_checker, daemon=True)
     status_thread.start()
 
-    # === 房间自动刷新: 每3分钟从抖音电商分类页抓取当前带货直播间 ===
-    refresh_thread = threading.Thread(target=_room_auto_refresh, daemon=True)
-    refresh_thread.start()
+    # === 定时自动发现: [DISABLED] 同上，避免Playwright子进程竞争 ===
+    # discovery_thread = threading.Thread(target=_scheduled_discovery, daemon=True)
+    # discovery_thread.start()
 
-    # === 模拟弹幕已禁用：只使用CDP爬取的真实弹幕 ===
+    # === 模拟弹幕已禁用（用户要求只使用真实弹幕数据）===
     # sim_danmaku_thread = threading.Thread(target=_simulated_danmaku_generator, daemon=True)
     # sim_danmaku_thread.start()
 

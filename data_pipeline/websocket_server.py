@@ -129,10 +129,12 @@ class DanmakuWebSocketServer:
         targets.update(self.clients.get(room_id, set()))
         targets.update(self.all_clients)
 
-        _should_log = _cnt <= 3 or _cnt % 100 == 0 or len(targets) > 0
+        _all_cl = len(self.all_clients)
+        _room_cl = len(self.clients.get(room_id, set()))
+        _should_log = _cnt <= 3 or _cnt % 100 == 0 or len(targets) > 0 or (_all_cl + _room_cl) > 0
         if _should_log:
             print(f"  [WS-ASYNC] push #{_cnt} room={room_id} targets={len(targets)} "
-                  f"(all={len(self.all_clients)} room_cl={len(self.clients.get(room_id, set()))})",
+                  f"(all={_all_cl} room_cl={_room_cl})",
                   flush=True)
 
         dead = set()
@@ -329,11 +331,12 @@ class DanmakuDirectPusher:
                       f"running={self.ws_server.running}", flush=True)
             return
         try:
+            norm_id = self.ws_server._normalize_room_id(room_id)
             _should_log = (self._push_count <= 3 or self._push_count % 100 == 0)
             if _should_log:
                 _n_all = len(self.ws_server.all_clients)
-                _n_room = len(self.ws_server.clients.get(room_id, set()))
-                print(f"  [PUSHER] #{self._push_count} room={room_id} "
+                _n_room = len(self.ws_server.clients.get(norm_id, set()))
+                print(f"  [PUSHER] #{self._push_count} room={norm_id} "
                       f"all={_n_all} room_cl={_n_room} "
                       f"type={data.get('danmaku_type','?')} "
                       f"user={data.get('user_name','?')[:10]}", flush=True)
@@ -341,7 +344,6 @@ class DanmakuDirectPusher:
                 self.ws_server.push_danmaku(room_id, data),
                 self.ws_server._loop
             )
-            # 仅对前 2 条消息等待 future 完成，确认推送成功
             if self._push_count <= 2:
                 try:
                     future.result(timeout=2)

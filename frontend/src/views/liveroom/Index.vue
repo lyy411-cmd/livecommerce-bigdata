@@ -25,7 +25,6 @@
           <span v-if="lastUpdate" class="update-time">更新于 {{ lastUpdate }}</span>
         </div>
       </div>
-
       <el-tabs v-model="activeTab" class="room-tabs" @tab-change="onTabChange">
         <el-tab-pane :label="`正在直播 (${filteredLive.length})`" name="live">
           <el-table
@@ -105,6 +104,24 @@
         </el-tab-pane>
       </el-tabs>
     </el-card>
+
+    <!-- 弹幕预览抽屉 -->
+    <el-drawer
+      v-model="danmakuDrawerVisible"
+      :title="danmakuRoom ? `${danmakuRoom.roomName || '直播间'} - 实时弹幕` : '弹幕'"
+      direction="rtl"
+      size="420px"
+      :destroy-on-close="true"
+    >
+      <div v-if="danmakuRoom" class="danmaku-drawer-body">
+        <DanmakuViewer
+          :room-id="danmakuRoom.roomNo || danmakuRoom.roomIdExternal"
+          :is-live="danmakuRoom.status === 'live'"
+          :max-messages="20"
+          style="height: 100%"
+        />
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -112,7 +129,8 @@
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { getRoomPage, getLiveRooms, rotateDemoRooms, refreshLiveRooms } from '@/api'
+import { getRoomPage, getLiveRooms, rotateDemoRooms, refreshLiveRooms, discoverRooms, getDiscoverStatus } from '@/api'
+import DanmakuViewer from '@/components/DanmakuViewer.vue'
 
 const router = useRouter()
 
@@ -193,22 +211,56 @@ const onRotate = async () => {
 }
 
 const refreshing = ref(false)
+const discoverMsg = ref('')
+let _discoverTimer = null
+
 const onRefreshLive = async () => {
   refreshing.value = true
+  discoverMsg.value = ''
   try {
-    const res = await refreshLiveRooms()
-    ElMessage.success(res?.msg || '刷新完成，已从抖音获取最新直播房间')
-    await fetchData()
+    const res = await discoverRooms()
+    ElMessage.info(res?.msg || '正在发现带货直播间...')
+    // Start polling every 5 seconds
+    if (_discoverTimer) clearInterval(_discoverTimer)
+    _discoverTimer = setInterval(async () => {
+      try {
+        const s = await getDiscoverStatus()
+        const d = s?.data || {}
+        if (d.running) {
+          // Show progress
+          const cv = d.cartVerify || {}
+          const p = cv.progress || {}
+          if (p.total) {
+            discoverMsg.value = `DOM验证中: ${p.done || 0}/${p.total} (购物车:${p.cart || 0})`
+          } else {
+            discoverMsg.value = d.phase || '爬取+验证中...'
+          }
+        } else {
+          // Discovery finished
+          clearInterval(_discoverTimer)
+          _discoverTimer = null
+          refreshing.value = false
+          discoverMsg.value = ''
+          ElMessage.success('发现完成，已更新带货直播间列表')
+          await fetchData()
+        }
+      } catch(e) {
+        // Polling error - keep trying
+      }
+    }, 5000)
   } catch (e) {
-    ElMessage.error('刷新失败，请稍后重试')
-  } finally {
+    const msg = e?.response?.data?.msg || '发现失败，请稍后重试'
+    ElMessage.error(msg)
     refreshing.value = false
   }
 }
 
+const danmakuDrawerVisible = ref(false)
+const danmakuRoom = ref(null)
+
 const viewDanmaku = (row) => {
-  const rid = row.roomNo || row.roomIdExternal || String(row.id)
-  router.push(`/live-room/${rid}`)
+  danmakuRoom.value = row
+  danmakuDrawerVisible.value = true
 }
 
 const jumpToLive = (row) => {
@@ -223,9 +275,11 @@ const jumpToLive = (row) => {
 let refreshTimer
 onMounted(() => {
   fetchData()
-  refreshTimer = setInterval(fetchData, 30000)
+  refreshTimer = setInterval(() => {
+    fetchData()
+  }, 30000)
 })
-onBeforeUnmount(() => clearInterval(refreshTimer))
+onBeforeUnmount(() => { clearInterval(refreshTimer); if (_discoverTimer) clearInterval(_discoverTimer) })
 </script>
 
 <style scoped lang="scss">
@@ -244,4 +298,11 @@ onBeforeUnmount(() => clearInterval(refreshTimer))
   :deep(.el-tabs__item) { font-size: 14px; font-weight: 600; }
 }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+.danmaku-drawer-body {
+  height: calc(100vh - 120px);
+  display: flex;
+  flex-direction: column;
+  :deep(.danmaku-viewer) { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  :deep(.danmaku-stream) { flex: 1; overflow-y: auto; min-height: 0; }
+}
 </style>

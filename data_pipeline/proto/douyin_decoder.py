@@ -397,41 +397,52 @@ def decode_websocket_frame(
     binary_data: bytes,
 ) -> Tuple[int, List[Dict[str, Any]], str, bool, str]:
     """
-    解码完整的 WebSocket 二进制帧。
+    解码弹幕二进制数据，自动检测帧格式。
 
-    处理流程:
-        1. 解析 PushFrame（最外层）
-        2. gzip 解压 payload
-        3. 解析 Response 消息
-        4. 逐条解析 messagesList 中的 Message
+    支持两种格式:
+        1. PushFrame 格式 (WebSocket 帧):
+           PushFrame -> gzip 解压 -> Response -> Message[]
+        2. Response 格式 (HTTP fetch 响应):
+           [可选 gzip 解压] -> Response -> Message[]
 
-    :param binary_data: WebSocket 接收到的原始字节
+    自动检测: 解析 PushFrame 后若 payload 为空，
+    则判定为 Response 直接格式，跳过 PushFrame 层。
+
+    :param binary_data: 原始字节数据
     :return: (log_id, parsed_messages, cursor, need_ack, internal_ext)
-             - log_id:        PushFrame 中的日志 ID
-             - parsed_messages: 已解析的业务消息字典列表
-             - cursor:        分页游标（用于下次请求）
-             - need_ack:      是否需要发送 ACK
-             - internal_ext:  ACK 帧所需的扩展字符串
     """
-    # 1. 解析外层 PushFrame
-    frame = parse_push_frame(binary_data)
+    if not binary_data:
+        return 0, [], '', False, ''
+
+    # 0. 检测 gzip 魔数 (1f 8b) — HTTP fetch 响应可能是 gzip 压缩的
+    data = binary_data
+    if len(data) >= 2 and data[0] == 0x1f and data[1] == 0x8b:
+        try:
+            data = gzip.decompress(data)
+        except Exception:
+            data = binary_data  # 解压失败，使用原始数据
+
+    # 1. 尝试作为 PushFrame 解析
+    frame = parse_push_frame(data)
     log_id = frame['log_id']
-    encoding = frame.get('payload_encoding', 'gzip')
+    encoding = frame.get('payload_encoding', '')
     payload = frame['payload']
 
-    if not payload:
-        return log_id, [], '', False, ''
+    if payload:
+        # PushFrame 格式: 解压 payload 得到 Response
+        decompressed = decompress_payload(payload, encoding or 'gzip')
+    else:
+        # Response 直接格式 (HTTP fetch 返回裸 Response protobuf)
+        log_id = 0
+        decompressed = data
 
-    # 2. 解压 payload
-    decompressed = decompress_payload(payload, encoding)
-
-    # 3. 解析 Response
+    # 2. 解析 Response
     response = parse_response(decompressed)
     cursor = response['cursor']
     need_ack = response['need_ack']
     internal_ext = response['internal_ext']
 
-    # 4. 逐条解析 Message
+    # 3. 逐条解析 Message
     parsed_messages: List[Dict[str, Any]] = []
     for msg_bytes in response['messages_list']:
         try:

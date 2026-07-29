@@ -292,15 +292,25 @@ class DouyinLiveCrawler:
             self._build_ack_frame = None
 
         # 反检测：尝试加载 playwright-stealth
+        self._real_chrome = False  # 是否使用真实 Chrome（通过 CDP 连接）
         self._stealth_available = False
+        self._stealth_async = None
         try:
-            from playwright_stealth import stealth_async
-            self._stealth_async = stealth_async
+            # 新版 API: Stealth 类
+            from playwright_stealth import Stealth
+            _stealth_instance = Stealth()
+            self._stealth_async = _stealth_instance.apply_stealth_async
             self._stealth_available = True
-            logger.info("已加载 playwright-stealth 反检测插件")
+            logger.info("已加载 playwright-stealth 反检测插件 (新版 Stealth API)")
         except ImportError:
-            logger.info("playwright-stealth 未安装，将使用内置反检测脚本")
-            self._stealth_async = None
+            try:
+                # 旧版 API: stealth_async 函数
+                from playwright_stealth import stealth_async
+                self._stealth_async = stealth_async
+                self._stealth_available = True
+                logger.info("已加载 playwright-stealth 反检测插件 (旧版 stealth_async)")
+            except ImportError:
+                logger.info("playwright-stealth 未安装，将使用内置反检测脚本")
 
         # 确保目录存在
         BROWSER_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
@@ -363,18 +373,53 @@ class DouyinLiveCrawler:
     # ------------------------------------------------------------------
     #  浏览器初始化
     # ------------------------------------------------------------------
-    async def init_browser(self):
+    async def init_browser(self, cdp_port=None):
         """
         初始化 Playwright 浏览器实例。
-        - 使用持久化上下文保存登录状态
-        - 注入反检测脚本
-        - 加载已保存的 Cookie
+        - cdp_port: 若提供，通过 CDP 连接到已有的真实 Chrome 浏览器
+        - 否则使用持久化上下文启动 Playwright 自带的 Chromium
         """
         from playwright.async_api import async_playwright
 
-        logger.info("正在启动 Playwright 浏览器...")
-
         self._playwright = await async_playwright().start()
+
+        # ── CDP 连接模式：使用用户的真实 Chrome ──
+        if cdp_port:
+            logger.info(f"正在通过 CDP 连接到真实 Chrome (port={cdp_port})...")
+            try:
+                self._browser = await self._playwright.chromium.connect_over_cdp(
+                    f"http://localhost:{cdp_port}"
+                )
+                # 获取已有的 contexts（用户的真实浏览器会话）
+                contexts = self._browser.contexts
+                if contexts:
+                    self._context = contexts[0]
+                    logger.info(f"已连接到真实 Chrome！{len(self._context.pages)} 个页面已打开")
+                else:
+                    self._context = await self._browser.new_context()
+                    logger.info("已连接到真实 Chrome（新建 context）")
+                self._real_chrome = True
+
+                # 注入已保存的 Cookie
+                _cookie_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    'cookies', 'douyin_cookies.json',
+                )
+                if os.path.exists(_cookie_path):
+                    import json as _json
+                    with open(_cookie_path, 'r', encoding='utf-8') as _cf:
+                        _saved = _json.load(_cf)
+                    await self._context.add_cookies(_saved)
+                    logger.info(f"已注入 {len(_saved)} 条 Cookie 到真实 Chrome")
+
+                return
+            except Exception as cdp_err:
+                logger.error(f"CDP 连接失败: {cdp_err}")
+                logger.info("回退到 Playwright 自带 Chromium...")
+                # Fall through to normal launch
+
+        # ── 正常模式：Playwright 自带 Chromium ──
+        logger.info("正在启动 Playwright 浏览器...")
 
         # 使用持久化上下文，保存浏览器数据到 user_data_dir
         # 先尝试清理残留 lockfile（上次崩溃可能未释放）
@@ -401,6 +446,7 @@ class DouyinLiveCrawler:
                     "--no-default-browser-check",
                     "--disk-cache-size=1",
                     "--disable-background-networking",
+                    "--window-position=9999,9999",
                 ],
                 ignore_https_errors=True,
             )
@@ -445,6 +491,7 @@ class DouyinLiveCrawler:
                     "--no-default-browser-check",
                     "--disk-cache-size=1",
                     "--disable-background-networking",
+                    "--window-position=9999,9999",
                 ],
                 ignore_https_errors=True,
             )
@@ -1393,30 +1440,31 @@ class DouyinLiveCrawler:
         callback: Callable[[dict, str, str], None],
         duration: int = 300,
         signing_page=None,
+        signing_lock=None,
     ):
         """
-        通过浏览器 JS 内的 WebSocket 连接接收弹幕，再桥接到 Python 回调。
+        通过浏览器内 JavaScript WebSocket 接收抖音弹幕。
 
-        在签名页（目录页）的 JavaScript 上下文中打开 WebSocket 连接，
-        利用浏览器自带的 Cookie / frontierSign 签名绕过所有反爬检测。
-        收到的二进制帧经 base64 编码传回 Python，由 protobuf 解码器解析。
+        在真实 Chrome 125 浏览器内部创建 WebSocket 连接（设备指纹合法），
+        通过 page.evaluate 轮询获取 base64 编码的 protobuf 帧，在 Python 端解码。
 
         Args:
-            room_id:      直播间 web_rid 或内部 room_id。
+            room_id:      直播间内部 room_id（19位数字，非 web_rid）。
             callback:     消息回调 callback(message_dict, room_id, platform)。
             duration:     持续时间（秒）。
             signing_page: 已加载抖音目录页的 Playwright Page。
+            signing_lock: asyncio.Lock，多房间共享签名页时序列化 evaluate 调用。
         """
+        import base64 as _b64
+
         if not signing_page:
             raise RuntimeError("start_danmaku_bridge requires a signing_page")
         if not self._decode_websocket_frame or not self._build_ack_frame:
             raise RuntimeError("Protobuf decoder not available")
 
-        import base64 as _b64
+        logger.info(f"[房间 {room_id}] 启动浏览器内 WS 弹幕桥接...")
 
-        logger.info(f"[房间 {room_id}] 启动浏览器桥接弹幕流...")
-
-        # ── Phase 1: 在浏览器 JS 中打开 WebSocket ──
+        # ── Phase 1: 用 Playwright 签名 URL + 调用 enter API ──
         ts = str(int(time.time() * 1000))
         cursor = f"t-{ts}_r-1_d-1_u-1_h-1"
         internal_ext = (
@@ -1425,9 +1473,22 @@ class DouyinLiveCrawler:
             f"|fetch_time:{ts}|seq:1|wss_info:0-{ts}-0-0"
         )
 
-        setup_result = await signing_page.evaluate("""async ([roomId, cursor, iext]) => {
+        _use_lock = signing_lock is not None
+
+        if _use_lock:
+            await signing_lock.acquire()
+        try:
+            sign_result = await signing_page.evaluate("""async ([roomId, cursor, iext]) => {
             try {
-                if (!window.__dmBridges) window.__dmBridges = {};
+                // Call enter API to establish room session
+                let enterOk = false;
+                try {
+                    const enterUrl = 'https://live.douyin.com/webcast/room/web/enter/?aid=6383&app_name=douyin_web&live_id=1&device_platform=web&enter_from=web_live&web_rid=' + roomId;
+                    const enterResp = await fetch(enterUrl, {credentials: 'include'});
+                    const enterJson = await enterResp.json();
+                    enterOk = (enterJson.status_code === 0);
+                } catch(e) { /* ignore */ }
+                await new Promise(r => setTimeout(r, 300));
 
                 const params = new URLSearchParams({
                     app_name: 'douyin_web',
@@ -1462,7 +1523,7 @@ class DouyinLiveCrawler:
 
                 const unsignedUrl = 'wss://webcast5-ws-web-lf.douyin.com/webcast/im/push/v2/?' + params.toString();
 
-                // Sign with frontierSign (AWAIT the Promise!)
+                // Sign with frontierSign
                 let signedUrl = unsignedUrl;
                 let sigMethod = 'none';
                 try {
@@ -1480,203 +1541,254 @@ class DouyinLiveCrawler:
                             signedUrl = unsignedUrl + '&signature=' + signResult.signature;
                             sigMethod = 'frontierSign:signature';
                         } else {
-                            sigMethod = 'frontierSign:unknown_result(' + JSON.stringify(signResult).substring(0,80) + ')';
+                            sigMethod = 'frontierSign:unknown';
                         }
                     }
                 } catch(e) { sigMethod = 'frontierSign_error:' + e.message; }
 
-                // Create bridge state
-                const bridge = {
-                    messages: [],
-                    connected: false,
-                    error: null,
-                    closed: false,
-                    count: 0,
-                    ws: null,
-                    sigMethod: sigMethod,
-                };
-
-                bridge.ws = new WebSocket(signedUrl);
-                bridge.ws.binaryType = 'arraybuffer';
-
-                bridge.ws.onopen = () => { bridge.connected = true; };
-                bridge.ws.onmessage = (e) => {
-                    if (e.data instanceof ArrayBuffer) {
-                        const bytes = new Uint8Array(e.data);
-                        let binary = '';
-                        for (let i = 0; i < bytes.byteLength; i++) {
-                            binary += String.fromCharCode(bytes[i]);
-                        }
-                        bridge.messages.push(btoa(binary));
-                        bridge.count++;
-                    }
-                };
-                bridge.ws.onerror = (e) => {
-                    bridge.error = 'ws_error';
-                    bridge.readyState = bridge.ws.readyState;
-                    bridge.urlLen = signedUrl.length;
-                    try { bridge.errorDetail = JSON.stringify({type: e.type, rs: bridge.ws.readyState}); } catch(ex) {}
-                };
-                bridge.ws.onclose = (e) => {
-                    bridge.closed = true;
-                    bridge.closeCode = e.code;
-                    bridge.closeReason = e.reason || '';
-                    bridge.wasClean = e.wasClean;
-                };
-
-                // Heartbeat every 10s
-                bridge.hbInterval = setInterval(() => {
-                    if (bridge.ws.readyState === WebSocket.OPEN) {
-                        const hb = new Uint8Array([50, 2, 104, 98, 66, 1, 0]);
-                        bridge.ws.send(hb.buffer);
-                    }
-                }, 10000);
-
-                window.__dmBridges[roomId] = bridge;
-                return { ok: true, sigMethod: sigMethod, url: signedUrl.substring(0, 120) };
+                return { ok: true, sigMethod: sigMethod, signedUrl: signedUrl, enterOk: enterOk };
             } catch(e) {
                 return { ok: false, error: e.message };
             }
         }""", [room_id, cursor, internal_ext])
+        finally:
+            if _use_lock:
+                signing_lock.release()
 
-        if not setup_result.get('ok'):
-            raise RuntimeError(f"JS WebSocket setup failed: {setup_result.get('error')}")
+        if not sign_result.get('ok'):
+            raise RuntimeError(f"URL signing failed: {sign_result.get('error')}")
 
-        _sig = setup_result.get('sigMethod', '?')
-        logger.info(f"[房间 {room_id}] JS WebSocket opening... sig={_sig}")
+        signed_url = sign_result['signedUrl']
+        _sig = sign_result.get('sigMethod', '?')
+        _enter = sign_result.get('enterOk', False)
+        logger.info(f"[房间 {room_id}] URL signed: sig={_sig}, enterApi={'OK' if _enter else 'FAIL'}, "
+                     f"url_len={len(signed_url)}")
 
-        # ── Phase 2: Poll messages from JS and decode in Python ──
+        # ── Phase 2: 在浏览器内部创建 WebSocket ──
+        _bridge_key = f"ws_{room_id}"
+
+        if _use_lock:
+            await signing_lock.acquire()
+        try:
+            create_result = await signing_page.evaluate("""([signedUrl, bridgeKey]) => {
+                // Initialize bridge registry
+                if (!window.__ws_bridge) window.__ws_bridge = {};
+
+                // Clean up existing WS for this room
+                if (window.__ws_bridge[bridgeKey]) {
+                    try {
+                        clearInterval(window.__ws_bridge[bridgeKey].hbTimer);
+                        window.__ws_bridge[bridgeKey].ws.close();
+                    } catch(e) {}
+                }
+
+                const ws = new WebSocket(signedUrl);
+                ws.binaryType = 'arraybuffer';
+
+                const state = {
+                    ws: ws,
+                    messages: [],
+                    status: 'connecting',
+                    error: null,
+                    closeCode: null,
+                    closeReason: '',
+                    msgCount: 0,
+                    hbTimer: null,
+                };
+                window.__ws_bridge[bridgeKey] = state;
+
+                ws.onopen = () => {
+                    state.status = 'open';
+                    // Start heartbeat
+                    state.hbTimer = setInterval(() => {
+                        if (ws.readyState === WebSocket.OPEN) {
+                            ws.send(new Uint8Array([50, 2, 104, 98, 66, 1, 0]));
+                        }
+                    }, 10000);
+                };
+
+                ws.onmessage = (event) => {
+                    if (event.data instanceof ArrayBuffer) {
+                        const bytes = new Uint8Array(event.data);
+                        let binary = '';
+                        for (let i = 0; i < bytes.length; i++) {
+                            binary += String.fromCharCode(bytes[i]);
+                        }
+                        state.messages.push(btoa(binary));
+                        state.msgCount++;
+                    }
+                };
+
+                ws.onerror = () => {
+                    state.error = 'ws_error';
+                };
+
+                ws.onclose = (e) => {
+                    state.status = 'closed';
+                    state.closeCode = e.code;
+                    state.closeReason = e.reason || '';
+                    if (state.hbTimer) clearInterval(state.hbTimer);
+                };
+
+                return { ok: true };
+            }""", [signed_url, _bridge_key])
+        finally:
+            if _use_lock:
+                signing_lock.release()
+
+        if not create_result.get('ok'):
+            raise RuntimeError(f"Browser WS creation failed")
+
+        logger.info(f"[房间 {room_id}] Browser WebSocket created (bridgeKey={_bridge_key})")
+
+        # ── Phase 3: 轮询获取消息 ──
         message_count = 0
         start_time = time.time()
-        _empty_polls = 0
         _last_ack_iext = ''
+        _poll_interval = 3  # seconds
+        _empty_polls = 0
+        _max_empty_polls = 30  # 90s without messages → give up
+
+        # Wait a moment for WS to connect
+        await asyncio.sleep(2)
 
         try:
             while time.time() - start_time < duration:
-                await asyncio.sleep(2)
+                await asyncio.sleep(_poll_interval)
 
-                # Check if signing page is still alive
+                # Poll messages from browser
+                if _use_lock:
+                    await signing_lock.acquire()
                 try:
-                    _alive = await signing_page.evaluate(f"""() => {{
-                        const b = window.__dmBridges && window.__dmBridges['{room_id}'];
-                        if (!b) return {{ alive: false, reason: 'no_bridge' }};
-                        return {{
-                            alive: true,
-                            connected: b.connected,
-                            closed: b.closed,
-                            error: b.error,
-                            count: b.count,
-                            pending: b.messages.length,
-                            closeCode: b.closeCode || 0,
-                            readyState: b.ws ? b.ws.readyState : -1,
-                        }};
-                    }}""")
-                except Exception as poll_err:
-                    logger.warning(f"[房间 {room_id}] Bridge poll error: {poll_err}")
+                    poll_result = await signing_page.evaluate("""([bridgeKey]) => {
+                        const state = window.__ws_bridge && window.__ws_bridge[bridgeKey];
+                        if (!state) return { status: 'no_bridge', messages: [] };
+                        const msgs = state.messages.splice(0, 100);
+                        return {
+                            status: state.status,
+                            closeCode: state.closeCode,
+                            closeReason: state.closeReason,
+                            error: state.error,
+                            messages: msgs,
+                            msgCount: state.msgCount,
+                        };
+                    }""", [_bridge_key])
+                except Exception as eval_err:
+                    logger.warning(f"[房间 {room_id}] Poll evaluate error: {eval_err}")
+                    # Page might be detached or crashed
+                    break
+                finally:
+                    if _use_lock:
+                        signing_lock.release()
+
+                if not poll_result:
                     break
 
-                if not _alive.get('alive'):
-                    logger.warning(f"[房间 {room_id}] Bridge not alive: {_alive}")
-                    break
+                _status = poll_result.get('status', 'unknown')
 
-                if _alive.get('error'):
-                    # Wait briefly for onclose to fire after onerror
-                    await asyncio.sleep(1)
-                    _close_info = await signing_page.evaluate(f"""() => {{
-                        const b = window.__dmBridges && window.__dmBridges['{room_id}'];
-                        if (!b) return {{}};
-                        return {{
-                            closed: b.closed,
-                            closeCode: b.closeCode || 0,
-                            closeReason: b.closeReason || '',
-                            readyState: b.ws ? b.ws.readyState : -1,
-                            urlLen: b.urlLen || 0,
-                        }};
-                    }}""")
-                    _cc = _close_info.get('closeCode', 0)
-                    _rs = _close_info.get('readyState', -1)
-                    logger.warning(f"[房间 {room_id}] Bridge WS error: {_alive['error']}, "
-                                   f"closeCode={_cc}, readyState={_rs}, urlLen={_close_info.get('urlLen', 0)}")
-                    break
-
-                if _alive.get('closed'):
-                    _code = _alive.get('closeCode', 0)
-                    logger.info(f"[房间 {room_id}] JS WebSocket closed (code={_code})")
-                    break
-
-                _pending = _alive.get('pending', 0)
-                if _pending == 0:
-                    _empty_polls += 1
-                    # If no messages for 60s and never connected, the room might be ended
-                    if _empty_polls > 30 and not _alive.get('connected'):
-                        logger.info(f"[房间 {room_id}] Never connected after {_empty_polls*2}s, giving up")
+                # Check WS status
+                if _status == 'closed':
+                    _code = poll_result.get('closeCode', '?')
+                    _reason = poll_result.get('closeReason', '')
+                    logger.warning(f"[房间 {room_id}] Browser WS closed: code={_code}, reason={_reason}")
+                    if _code != 1000 and _code != 1001:
+                        # Abnormal close
                         break
-                    continue
+                    # Normal close (1000/1001) — room might have ended
+                    break
 
-                _empty_polls = 0
+                if _status == 'no_bridge':
+                    logger.warning(f"[房间 {room_id}] Bridge state lost")
+                    break
 
-                # Fetch and process messages
-                raw_messages = await signing_page.evaluate(f"""() => {{
-                    const b = window.__dmBridges && window.__dmBridges['{room_id}'];
-                    if (!b || b.messages.length === 0) return [];
-                    const batch = b.messages.splice(0, 50);
-                    return batch;
-                }}""")
+                # Process messages
+                _msgs = poll_result.get('messages', [])
+                if _msgs:
+                    _empty_polls = 0
+                    for b64_msg in _msgs:
+                        try:
+                            raw_bytes = _b64.b64decode(b64_msg)
+                            _, messages, _, need_ack, iext = self._decode_websocket_frame(raw_bytes)
+                            for msg in messages:
+                                try:
+                                    if asyncio.iscoroutinefunction(callback):
+                                        await callback(msg, room_id, "douyin")
+                                    else:
+                                        callback(msg, room_id, "douyin")
+                                    message_count += 1
+                                except Exception as cb_err:
+                                    logger.debug(f"[房间 {room_id}] Callback error: {cb_err}")
 
-                for b64_data in (raw_messages or []):
-                    try:
-                        raw_bytes = _b64.b64decode(b64_data)
-                        _, messages, _, need_ack, iext = self._decode_websocket_frame(raw_bytes)
-                        for msg in messages:
-                            try:
-                                if asyncio.iscoroutinefunction(callback):
-                                    await callback(msg, room_id, "douyin")
-                                else:
-                                    callback(msg, room_id, "douyin")
-                                message_count += 1
-                            except Exception as cb_err:
-                                logger.debug(f"[房间 {room_id}] Callback error: {cb_err}")
+                            # Send ACK if needed
+                            if need_ack and iext and iext != _last_ack_iext:
+                                _last_ack_iext = iext
+                                try:
+                                    ack_bytes = self._build_ack_frame(iext)
+                                    ack_b64 = _b64.b64encode(ack_bytes).decode()
+                                    if _use_lock:
+                                        await signing_lock.acquire()
+                                    try:
+                                        await signing_page.evaluate("""([bridgeKey, ackB64]) => {
+                                            const state = window.__ws_bridge && window.__ws_bridge[bridgeKey];
+                                            if (state && state.ws.readyState === WebSocket.OPEN) {
+                                                const binary = atob(ackB64);
+                                                const bytes = new Uint8Array(binary.length);
+                                                for (let i = 0; i < binary.length; i++) {
+                                                    bytes[i] = binary.charCodeAt(i);
+                                                }
+                                                state.ws.send(bytes);
+                                                return { ok: true };
+                                            }
+                                            return { ok: false };
+                                        }""", [_bridge_key, ack_b64])
+                                    finally:
+                                        if _use_lock:
+                                            signing_lock.release()
+                                except Exception as ack_err:
+                                    logger.debug(f"[房间 {room_id}] ACK send error: {ack_err}")
+                        except Exception as dec_err:
+                            logger.debug(f"[房间 {room_id}] Frame decode error: {dec_err}")
 
-                        # Send ACK via JS WebSocket if needed
-                        if need_ack and iext and iext != _last_ack_iext:
-                            _last_ack_iext = iext
-                            try:
-                                await signing_page.evaluate(f"""(ackStr) => {{
-                                    const b = window.__dmBridges && window.__dmBridges['{room_id}'];
-                                    if (b && b.ws && b.ws.readyState === 1) {{
-                                        // Decode base64 ack frame to ArrayBuffer
-                                        const raw = atob(ackStr);
-                                        const bytes = new Uint8Array(raw.length);
-                                        for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-                                        b.ws.send(bytes.buffer);
-                                    }}
-                                }}""", _b64.b64encode(self._build_ack_frame(iext)).decode('ascii'))
-                            except Exception as ack_err:
-                                logger.debug(f"[房间 {room_id}] ACK send error: {ack_err}")
-                    except Exception as dec_err:
-                        logger.debug(f"[房间 {room_id}] Frame decode error: {dec_err}")
+                    if message_count > 0 and message_count % 100 == 0:
+                        logger.info(f"[房间 {room_id}] Browser WS: {message_count} messages so far")
+                else:
+                    if _status == 'connecting':
+                        continue  # Still connecting, don't count as empty
+                    _empty_polls += 1
+                    if _empty_polls >= _max_empty_polls:
+                        logger.info(f"[房间 {room_id}] {_max_empty_polls} empty polls, stopping")
+                        break
 
-        except Exception as e:
-            logger.error(f"[房间 {room_id}] Bridge error: {e}")
+        except asyncio.CancelledError:
+            logger.info(f"[房间 {room_id}] Bridge cancelled")
+        except Exception as bridge_err:
+            logger.error(f"[房间 {room_id}] Bridge error: {bridge_err}")
         finally:
-            # ── Phase 3: Cleanup ──
+            # ── Phase 4: Cleanup ──
             try:
-                await signing_page.evaluate(f"""() => {{
-                    const b = window.__dmBridges && window.__dmBridges['{room_id}'];
-                    if (b) {{
-                        clearInterval(b.hbInterval);
-                        if (b.ws) try {{ b.ws.close(); }} catch(e) {{}}
-                        delete window.__dmBridges['{room_id}'];
-                    }}
-                }}""")
+                if _use_lock:
+                    await signing_lock.acquire()
+                try:
+                    await signing_page.evaluate("""([bridgeKey]) => {
+                        const state = window.__ws_bridge && window.__ws_bridge[bridgeKey];
+                        if (state) {
+                            if (state.hbTimer) clearInterval(state.hbTimer);
+                            try { state.ws.close(1000, 'done'); } catch(e) {}
+                            delete window.__ws_bridge[bridgeKey];
+                        }
+                    }""", [_bridge_key])
+                finally:
+                    if _use_lock:
+                        signing_lock.release()
             except Exception:
                 pass
+
             elapsed = time.time() - start_time
             logger.info(
-                f"[房间 {room_id}] 桥接弹幕流结束：{elapsed:.1f} 秒，共 {message_count} 条消息"
+                f"[房间 {room_id}] Browser WS 弹幕流结束：{elapsed:.1f} 秒，共 {message_count} 条消息"
             )
             if message_count == 0:
-                raise RuntimeError(f"Bridge received 0 messages in {elapsed:.1f}s (ws_error)")
+                raise RuntimeError(f"Browser WS received 0 messages in {elapsed:.1f}s")
 
     async def start_danmaku_http_poll(
         self,
@@ -1684,6 +1796,7 @@ class DouyinLiveCrawler:
         callback: Callable[[dict, str, str], None],
         duration: int = 300,
         signing_page=None,
+        signing_lock=None,
     ):
         """
         通过浏览器 JS fetch 轮询 HTTP 弹幕接口接收弹幕。
@@ -1703,35 +1816,39 @@ class DouyinLiveCrawler:
             raise RuntimeError("Protobuf decoder not available")
 
         import base64 as _b64
+        import json as _json
+        from data_pipeline.proto.douyin_decoder import MESSAGE_PARSERS as _MSG_PARSERS
 
         logger.info(f"[房间 {room_id}] 启动 HTTP fetch 轮询弹幕流...")
 
         message_count = 0
         start_time = time.time()
-        cursor = f"t-{int(time.time()*1000)}_r-1_d-1_u-1_h-1"
-        internal_ext = (
-            f"internal_src:dim|wss_push_room_id:{room_id}"
-            f"|wss_push_did:0|dim_log_id:{int(time.time()*1000)}"
-            f"|fetch_time:{int(time.time()*1000)}|seq:1|wss_info:0-{int(time.time()*1000)}-0-0"
-        )
+        cursor = ""  # 首次请求用空游标，后续用服务端返回的游标
+        internal_ext = ""
         _empty_count = 0
         _poll_interval = 3  # seconds between polls
 
         try:
             while time.time() - start_time < duration:
                 # Lightweight page health check (no navigation - just detect dead context)
+                # ── 使用签名锁序列化 evaluate 调用，防止并发死锁 ──
+                _use_lock = signing_lock is not None
+                if _use_lock:
+                    await signing_lock.acquire()
                 try:
-                    await signing_page.evaluate("1")
-                except Exception as page_err:
-                    err_msg = str(page_err)
-                    if 'destroyed' in err_msg or 'closed' in err_msg:
-                        logger.warning(f"[房间 {room_id}] Signing page context dead, stopping HTTP poll")
-                        break
-                    # Other errors (e.g., timeout) - just continue and try the fetch
+                    # Lightweight page health check
+                    try:
+                        await signing_page.evaluate("1")
+                    except Exception as page_err:
+                        err_msg = str(page_err)
+                        if 'destroyed' in err_msg or 'closed' in err_msg:
+                            logger.warning(f"[房间 {room_id}] Signing page context dead, stopping HTTP poll")
+                            break
+                        # Other errors - continue
 
-                # Make signed HTTP fetch from browser JS (with timeout to prevent hanging)
-                try:
-                    fetch_result = await asyncio.wait_for(signing_page.evaluate("""async ([roomId, cursor, iext]) => {
+                    # Make signed HTTP fetch from browser JS (with timeout)
+                    try:
+                        fetch_result = await asyncio.wait_for(signing_page.evaluate("""async ([roomId, cursor, iext]) => {
                     try {
                         const params = new URLSearchParams({
                             app_name: 'douyin_web',
@@ -1783,7 +1900,7 @@ class DouyinLiveCrawler:
                         } catch(e) { sigMethod = 'error:' + e.message; }
 
                         const controller = new AbortController();
-                        const fetchTimeout = setTimeout(() => controller.abort(), 10000);
+                        const fetchTimeout = setTimeout(() => controller.abort(), 30000);
                         let resp;
                         try {
                             resp = await fetch(url, { credentials: 'include', signal: controller.signal });
@@ -1817,13 +1934,16 @@ class DouyinLiveCrawler:
                     } catch(e) {
                         return { error: e.message };
                     }
-                }""", [room_id, cursor, internal_ext]), timeout=15)
-                except asyncio.TimeoutError:
-                    logger.warning(f"[房间 {room_id}] HTTP fetch evaluate timed out after 15s")
-                    fetch_result = {'error': 'evaluate_timeout'}
-                except Exception as eval_err:
-                    logger.warning(f"[房间 {room_id}] HTTP fetch evaluate error: {eval_err}")
-                    fetch_result = {'error': str(eval_err)[:80]}
+                }""", [room_id, cursor, internal_ext]), timeout=45)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"[房间 {room_id}] HTTP fetch evaluate timed out after 45s")
+                        fetch_result = {'error': 'evaluate_timeout'}
+                    except Exception as eval_err:
+                        logger.warning(f"[房间 {room_id}] HTTP fetch evaluate error: {eval_err}")
+                        fetch_result = {'error': str(eval_err)[:80]}
+                finally:
+                    if _use_lock:
+                        signing_lock.release()
 
                 if not fetch_result:
                     logger.warning(f"[房间 {room_id}] HTTP fetch returned null")
@@ -1850,6 +1970,8 @@ class DouyinLiveCrawler:
 
                 if _size == 0:
                     _empty_count += 1
+                    if _empty_count <= 3 or _empty_count % 10 == 0:
+                        logger.info(f"[房间 {room_id}] HTTP fetch empty (size=0, sig={_sig}, count={_empty_count})")
                     if _empty_count > 20:
                         logger.info(f"[房间 {room_id}] 20 consecutive empty responses, stopping")
                         break
@@ -1857,34 +1979,187 @@ class DouyinLiveCrawler:
                     continue
 
                 _empty_count = 0
+                _first_bytes = fetch_result.get('firstBytes', [])
+                _hex_str = ' '.join(f'{b:02x}' for b in _first_bytes[:8]) if _first_bytes else '?'
 
-                # Decode protobuf response
+                # Parse JSON response (NOT protobuf — /webcast/im/fetch/ returns JSON)
                 try:
                     raw_bytes = _b64.b64decode(fetch_result['data'])
+                    resp_json = _json.loads(raw_bytes.decode('utf-8', errors='replace'))
 
-                    # Try decoding as WebSocket frame format (same protobuf structure)
-                    _, messages, new_cursor, need_ack, new_iext = self._decode_websocket_frame(raw_bytes)
+                    data_list = resp_json.get('data', [])
+                    status_code = resp_json.get('status_code', -1)
+                    extra = resp_json.get('extra', {})
 
+                    # Update cursor from response
+                    # BUG FIX: live_cursor is often 'u-1_d-1' (static initial value, never advances!)
+                    # basic_cursor has 't-{timestamp}_r-1_d-1_u-1_h-1' format — always advancing
+                    # Prefer basic_cursor; only use live_cursor if it looks like a real cursor (has digits)
+                    _live_cursor = extra.get('live_cursor', '')
+                    _basic_cursor = extra.get('cursor', '')
+                    _fetch_interval = extra.get('fetch_interval', 0)
+                    if _basic_cursor and any(c.isdigit() for c in _basic_cursor):
+                        new_cursor = str(_basic_cursor)
+                    elif _live_cursor and any(c.isdigit() for c in _live_cursor):
+                        new_cursor = str(_live_cursor)
+                    else:
+                        new_cursor = str(extra.get('now', ''))
                     if new_cursor:
                         cursor = new_cursor
+                    new_iext = extra.get('internal_ext', '')
                     if new_iext:
                         internal_ext = new_iext
 
-                    for msg in messages:
-                        try:
-                            if asyncio.iscoroutinefunction(callback):
-                                await callback(msg, room_id, "douyin")
-                            else:
-                                callback(msg, room_id, "douyin")
-                            message_count += 1
-                        except Exception as cb_err:
-                            logger.debug(f"[房间 {room_id}] Callback error: {cb_err}")
+                    _n_msg = len(data_list) if data_list else 0
+                    if _n_msg > 0:
+                        logger.info(f"[房间 {room_id}] HTTP fetch: {_n_msg} msgs, status={status_code}, live_cursor={str(_live_cursor)[:30]}, basic_cursor={str(_basic_cursor)[:30]}, interval={_fetch_interval}")
+                        # Diagnostic: log first message structure and extra keys
+                        if message_count == 0:
+                            _extra_keys = list(extra.keys()) if isinstance(extra, dict) else []
+                            logger.info(f"[房间 {room_id}] Extra keys: {_extra_keys}")
+                            _first_item = data_list[0]
+                            if isinstance(_first_item, dict):
+                                _keys = list(_first_item.keys())
+                                _common = _first_item.get('common', {})
+                                _method = _common.get('method', '') if isinstance(_common, dict) else _first_item.get('method', '')
+                                _has_payload = 'payload' in _first_item
+                                _payload_len = len(str(_first_item.get('payload', ''))) if _has_payload else 0
+                                logger.info(f"[房间 {room_id}] First msg keys={_keys}, method={_method}, has_payload={_has_payload}, payload_len={_payload_len}")
+                                if not _has_payload:
+                                    _item_str = _json.dumps(_first_item, ensure_ascii=False)[:300]
+                                    logger.info(f"[房间 {room_id}] First msg content: {_item_str}")
+                    elif message_count == 0:
+                        # First poll with no messages — log full response for diagnosis
+                        _resp_str = _json.dumps(resp_json, ensure_ascii=False)[:500]
+                        logger.info(f"[房间 {room_id}] HTTP fetch JSON (first poll, size={_size}): {_resp_str}")
+                    elif _n_msg == 0 and message_count > 0:
+                        # Subsequent polls with empty data - log occasionally
+                        pass  # Normal: no new messages in this poll interval
 
-                    if message_count > 0 and message_count % 20 == 0:
+                    # Process each message in data array
+                    for item in (data_list or []):
+                        try:
+                            if not isinstance(item, dict):
+                                continue
+
+                            # Extract method from common.method (JSON format) or top-level method
+                            _common = item.get('common', {})
+                            method = ''
+                            if isinstance(_common, dict):
+                                method = _common.get('method', '')
+                            if not method:
+                                method = item.get('method', '')
+
+                            # Check for base64 protobuf payload
+                            payload_b64 = item.get('payload', '')
+
+                            if payload_b64 and method:
+                                # Decode base64 protobuf payload
+                                try:
+                                    payload_bytes = _b64.b64decode(payload_b64)
+                                    parser = _MSG_PARSERS.get(method)
+                                    if parser:
+                                        parsed = parser(payload_bytes)
+                                        parsed['method'] = method
+                                        if asyncio.iscoroutinefunction(callback):
+                                            await callback(parsed, room_id, "douyin")
+                                        else:
+                                            callback(parsed, room_id, "douyin")
+                                        message_count += 1
+                                except Exception as pb_err:
+                                    logger.debug(f"[房间 {room_id}] Protobuf payload decode error: {pb_err}")
+                            else:
+                                # JSON message — extract fields based on message type
+                                msg_dict = {}
+                                content = item.get('content', '')
+                                user_info = item.get('user', {})
+
+                                if method == 'WebcastChatMessage':
+                                    msg_dict = {
+                                        'type': 'comment',
+                                        'method': method,
+                                        'content': content,
+                                        'user': user_info if isinstance(user_info, dict) else {},
+                                    }
+                                elif method == 'WebcastLikeMessage':
+                                    _count = item.get('count', 1)
+                                    msg_dict = {
+                                        'type': 'like',
+                                        'method': method,
+                                        'count': _count,
+                                        'user': user_info if isinstance(user_info, dict) else {},
+                                    }
+                                elif method == 'WebcastMemberMessage':
+                                    msg_dict = {
+                                        'type': 'enter',
+                                        'method': method,
+                                        'user': user_info if isinstance(user_info, dict) else {},
+                                    }
+                                elif method == 'WebcastSocialMessage':
+                                    msg_dict = {
+                                        'type': 'follow',
+                                        'method': method,
+                                        'user': user_info if isinstance(user_info, dict) else {},
+                                    }
+                                elif method == 'WebcastRoomMessage':
+                                    # System message (welcome, rules) — pass through as 'system'
+                                    msg_dict = {
+                                        'type': 'system',
+                                        'method': method,
+                                        'content': content,
+                                    }
+                                elif method == 'WebcastGiftMessage':
+                                    msg_dict = {
+                                        'type': 'gift',
+                                        'method': method,
+                                        'user': user_info if isinstance(user_info, dict) else {},
+                                    }
+                                elif method:
+                                    msg_dict = {
+                                        'type': 'unknown',
+                                        'method': method,
+                                        'content': content,
+                                    }
+                                else:
+                                    # No method — pass through
+                                    msg_dict = dict(item)
+                                    msg_dict.setdefault('type', 'unknown')
+
+                                if msg_dict:
+                                    if asyncio.iscoroutinefunction(callback):
+                                        await callback(msg_dict, room_id, "douyin")
+                                    else:
+                                        callback(msg_dict, room_id, "douyin")
+                                    message_count += 1
+                        except Exception as msg_err:
+                            logger.debug(f"[房间 {room_id}] Message process error: {msg_err}")
+
+                    if message_count > 0 and message_count % 50 == 0:
                         logger.info(f"[房间 {room_id}] HTTP poll: {message_count} messages so far")
 
+                except _json.JSONDecodeError as json_err:
+                    # Response is not JSON — might be protobuf binary, try legacy decoder
+                    try:
+                        _, messages, new_cursor_pb, need_ack, new_iext_pb = self._decode_websocket_frame(raw_bytes)
+                        if new_cursor_pb:
+                            cursor = new_cursor_pb
+                        if new_iext_pb:
+                            internal_ext = new_iext_pb
+                        for msg in messages:
+                            try:
+                                if asyncio.iscoroutinefunction(callback):
+                                    await callback(msg, room_id, "douyin")
+                                else:
+                                    callback(msg, room_id, "douyin")
+                                message_count += 1
+                            except Exception as cb_err:
+                                logger.debug(f"[房间 {room_id}] Callback error: {cb_err}")
+                        if messages:
+                            logger.info(f"[房间 {room_id}] Protobuf fallback: {len(messages)} msgs")
+                    except Exception:
+                        logger.info(f"[房间 {room_id}] Decode failed: JSON err={json_err}, protobuf also failed (size={_size})")
                 except Exception as dec_err:
-                    logger.debug(f"[房间 {room_id}] Protobuf decode error: {dec_err} (size={_size}, sig={_sig}, ct={_ct})")
+                    logger.info(f"[房间 {room_id}] Decode error: {dec_err} (size={_size}, hex=[{_hex_str}])")
 
                 await asyncio.sleep(_poll_interval)
 
@@ -2089,14 +2364,15 @@ class DouyinLiveCrawler:
                     _extra = f" headers={dict(ise.response.headers)}"[:200]
             except Exception:
                 pass
-            logger.error(
-                f"[房间 {room_id}→{internal_room_id}] WS rejected (HTTP {ise.status_code}){_extra}"
-            )
+            _msg = f"WS rejected (HTTP {ise.status_code}){_extra}"
+            logger.error(f"[房间 {room_id}→{internal_room_id}] {_msg}")
+            raise RuntimeError(_msg) from ise
         except Exception as e:
             err_str = str(e)
             logger.error(
                 f"[房间 {room_id}→{internal_room_id}] 直连 WebSocket 异常: {err_str[:120]}"
             )
+            raise RuntimeError(f"直连WS失败: {err_str[:80]}") from e
         finally:
             if heartbeat_task:
                 heartbeat_task.cancel()
@@ -2119,6 +2395,7 @@ class DouyinLiveCrawler:
         callback: Callable[[dict, str, str], None],
         duration: int = 300,
         shared_context=None,
+        signing_page=None,
     ):
         """
         启动弹幕流抓取。
@@ -2325,8 +2602,13 @@ class DouyinLiveCrawler:
 
             monitor_page.on("websocket", _pw_ws_handler)
 
-        # 注入反检测脚本（在导航前）
-        if self._stealth_available:
+        # 注入反检测脚本（在导航前）— 真实 Chrome 跳过，避免画蛇添足
+        if not getattr(self, '_real_chrome', False):
+            if self._stealth_available:
+                try:
+                    await self._stealth_async(monitor_page)
+                except Exception:
+                    pass
             try:
                 await monitor_page.add_init_script(STEALTH_JS)
             except Exception:
@@ -2343,40 +2625,119 @@ class DouyinLiveCrawler:
             except Exception:
                 pass
 
-        # ── 导航到直播间 ──
+        # ── 导航到直播间（预热 + 直连策略）──
+        # 先访问首页建立会话（cookies/JS状态），再导航到房间
+        # 直连跳转模式容易被反爬检测；预热后更像真实用户
+        _room_url = f"https://live.douyin.com/{room_id}"
+        _nav_success = False
+
         try:
-            logger.info(
-                f"[房间 {room_id}] 正在导航到直播间（独立页面）..."
-            )
+            # 捕获页面JS错误和关键console消息
+            _js_errors = []
+            monitor_page.on("pageerror", lambda err: _js_errors.append(str(err)[:200]))
+            async def _on_console(msg):
+                text = msg.text
+                if any(kw in text.lower() for kw in ['websocket', 'ws error', 'signature', 'failed', 'blocked', 'refused', '403', '1006']):
+                    logger.info(f"[房间 {room_id}] [Console] {text[:150]}")
+            monitor_page.on("console", _on_console)
+
+            # ── 预热：先访问首页建立会话 ──
+            logger.info(f"[房间 {room_id}] 预热导航到首页...")
             try:
                 await monitor_page.goto(
-                    f"https://live.douyin.com/{room_id}",
+                    "https://live.douyin.com/",
                     wait_until="domcontentloaded",
-                    timeout=45000,
+                    timeout=20000,
                 )
-                logger.info(
-                    f"[房间 {room_id}] 页面导航成功（domcontentloaded）"
-                )
-                # 捕获页面JS错误和关键console消息，帮助诊断WS连接问题
-                _js_errors = []
-                monitor_page.on("pageerror", lambda err: _js_errors.append(str(err)[:200]))
-                async def _on_console(msg):
-                    text = msg.text
-                    if any(kw in text.lower() for kw in ['websocket', 'ws error', 'signature', 'failed', 'blocked', 'refused', '403', '1006']):
-                        logger.info(f"[房间 {room_id}] [Console] {text[:150]}")
-                monitor_page.on("console", _on_console)
-            except Exception as nav_err:
-                err_msg = str(nav_err)
-                if "ERR_ABORTED" in err_msg or "net::" in err_msg:
-                    logger.warning(
-                        f"[房间 {room_id}] 导航被中断（抖音反爬），继续等待原生 WS..."
-                    )
-                else:
-                    logger.warning(f"[房间 {room_id}] 导航失败: {nav_err}")
+            except Exception:
+                pass
+            await self._random_delay(3, 5)
 
-            # 给页面较长时间让原生 JS 建立 WebSocket
-            # （抖音的反爬检测需要一定时间完成）
-            await self._random_delay(8, 15)
+            # ── 策略 1：从首页导航到房间 URL（最自然）──
+            logger.info(f"[房间 {room_id}] 导航到直播间...")
+            try:
+                await monitor_page.goto(
+                    _room_url,
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+            except Exception as _goto_err:
+                logger.warning(f"[房间 {room_id}] goto 超时/错误: {str(_goto_err)[:80]}")
+            await self._random_delay(4, 7)
+
+            # ── 验证码检测 ──
+            for _attempt in range(3):
+                try:
+                    _title = await monitor_page.title()
+                    _url = monitor_page.url
+                    _cl = await monitor_page.evaluate(
+                        "document.body ? document.body.innerHTML.length : 0"
+                    )
+                except Exception:
+                    _title, _url, _cl = "", "", 0
+
+                if '验证码' not in _title and _cl > 5000:
+                    logger.info(
+                        f"[房间 {room_id}] 房间页面加载成功 "
+                        f"(body={_cl}B, attempt={_attempt+1})"
+                    )
+                    _nav_success = True
+                    break
+
+                if _attempt == 0:
+                    logger.warning(
+                        f"[房间 {room_id}] 验证码 (body={_cl}B)，"
+                        f"等待 45s 自动解决..."
+                    )
+                    import random as _rnd2
+                    for _w in range(9):
+                        # 模拟鼠标移动，看起来更像真人
+                        try:
+                            await monitor_page.mouse.move(
+                                _rnd2.randint(100, 900), _rnd2.randint(100, 600)
+                            )
+                        except Exception:
+                            pass
+                        await asyncio.sleep(5)
+                        try:
+                            _t2 = await monitor_page.title()
+                            _cl2 = await monitor_page.evaluate(
+                                "document.body ? document.body.innerHTML.length : 0"
+                            )
+                            if '验证码' not in _t2 and _cl2 > 5000:
+                                logger.info(
+                                    f"[房间 {room_id}] 验证码已自动解决！"
+                                    f"({(_w+1)*5}s)"
+                                )
+                                _nav_success = True
+                                break
+                        except Exception:
+                            pass
+                    if _nav_success:
+                        break
+
+                # ── 重试：模拟鼠标 + reload ──
+                if _attempt < 2:
+                    logger.info(
+                        f"[房间 {room_id}] 重试导航 (attempt {_attempt+2}/3)..."
+                    )
+                    try:
+                        import random as _rnd
+                        for _ in range(2):
+                            await monitor_page.mouse.move(
+                                _rnd.randint(100, 900), _rnd.randint(100, 600)
+                            )
+                            await asyncio.sleep(_rnd.uniform(0.3, 0.6))
+                        await monitor_page.reload(wait_until="domcontentloaded", timeout=20000)
+                        await self._random_delay(4, 7)
+                    except Exception:
+                        pass
+
+            if not _nav_success:
+                logger.warning(
+                    f"[房间 {room_id}] 3 次直连导航均触发验证码，放弃此房间"
+                )
+                return
 
             try:
                 await monitor_page.wait_for_load_state(
@@ -2385,13 +2746,13 @@ class DouyinLiveCrawler:
             except Exception:
                 pass
 
-            # ── 阶段 A：等待原生 WS（最多 60 秒） ──
-            # 非无头模式下抖音页面通常在 10-40 秒内建立 WebSocket
+            # ── 阶段 A：等待原生 WS（30s + 自动刷新 + 30s） ──
+            # 实测发现部分房间需要页面刷新后才建立 WS（如 160440565127）
             logger.info(
-                f"[房间 {room_id}] 等待页面原生 WebSocket 建立（最多 60 秒）..."
+                f"[房间 {room_id}] 等待页面原生 WebSocket 建立（最多 30 秒）..."
             )
             native_established = False
-            for tick in range(12):  # 12 * 5s = 60s
+            for tick in range(6):  # 6 * 5s = 30s
                 await asyncio.sleep(5)
                 if ws_ids:
                     native_established = True
@@ -2405,6 +2766,35 @@ class DouyinLiveCrawler:
                         f"[房间 {room_id}] 等待原生 WS... {(tick+1)*5}s"
                     )
 
+            # 30s 内未建立 WS → 自动刷新页面，再等 30s
+            if not native_established:
+                logger.info(
+                    f"[房间 {room_id}] 30s 内未建立 WS，执行页面刷新以触发 WS..."
+                )
+                try:
+                    await monitor_page.reload(wait_until="domcontentloaded", timeout=30000)
+                except Exception as _reload_err:
+                    logger.warning(
+                        f"[房间 {room_id}] 页面刷新失败: {_reload_err}，继续等待..."
+                    )
+                await self._random_delay(3, 6)
+                logger.info(
+                    f"[房间 {room_id}] 刷新后再等待 30 秒..."
+                )
+                for tick2 in range(6):  # 6 * 5s = 30s
+                    await asyncio.sleep(5)
+                    if ws_ids:
+                        native_established = True
+                        logger.info(
+                            f"[房间 {room_id}] 刷新后原生 WebSocket 已建立！"
+                            f"（刷新后 {tick2 * 5}s 时检测到 {len(ws_ids)} 个连接）"
+                        )
+                        break
+                    if (tick2 + 1) % 3 == 0:
+                        logger.info(
+                            f"[房间 {room_id}] 刷新后等待 WS... {(tick2+1)*5}s"
+                        )
+
             # ── 阶段 B：已禁用 ──
             # 不再注入 JS WebSocket。实测发现：
             # 1) 页面原生 WS 通常在 30-90 秒后建立（VM 较慢）
@@ -2412,13 +2802,51 @@ class DouyinLiveCrawler:
             # 3) DEVICE_BLOCKED 使注入的 WS 始终失败
             # CDP 被动截帧会在主循环中自动捕获原生 WS（无论何时建立）
             if not native_established:
+                # 最终检查：如果仍在验证码页面，放弃此房间避免浪费时间
+                try:
+                    _final_title = await monitor_page.title()
+                    _final_cl = await monitor_page.evaluate(
+                        "document.body ? document.body.innerHTML.length : 0"
+                    )
+                    if '验证码' in _final_title or _final_cl < 2000:
+                        logger.warning(
+                            f"[房间 {room_id}] 仍在验证码页面 "
+                            f"(title='{_final_title}', body={_final_cl}B)，"
+                            f"放弃此房间"
+                        )
+                        return  # 退出 start_danmaku_stream，让 run_room_monitor 尝试备用方案
+                except Exception:
+                    pass
+
                 logger.info(
-                    f"[房间 {room_id}] 原生 WS 尚未建立，跳过注入，"
+                    f"[房间 {room_id}] 原生 WS 尚未建立（已刷新页面），"
                     f"CDP 将在主循环中持续监听..."
                 )
 
+            # ── HTTP fetch 兜底：WS 60s 内未建立 → 启动 HTTP 轮询 ──
+            _http_poll_task = None
+            if not native_established and signing_page:
+                logger.info(
+                    f"[房间 {room_id}] WS 未建立，启动 HTTP fetch 轮询作为兜底..."
+                )
+                async def _http_poll_wrapper():
+                    """Wrap start_danmaku_http_poll to handle exceptions."""
+                    try:
+                        await self.start_danmaku_http_poll(
+                            room_id=room_id,
+                            callback=callback,
+                            duration=duration - (time.time() - start_time),
+                            signing_page=signing_page,
+                        )
+                    except Exception as poll_err:
+                        logger.warning(
+                            f"[房间 {room_id}] HTTP poll 异常: {poll_err}"
+                        )
+
+                _http_poll_task = asyncio.create_task(_http_poll_wrapper())
+
             # ── HTTP fetch 兜底变量初始化 ──
-            _fetch_fallback_active = False
+            _fetch_fallback_active = _http_poll_task is not None
             _fetch_cursor = ""
             _fetch_seen_msg_ids = set()
 
@@ -2600,6 +3028,13 @@ class DouyinLiveCrawler:
         except Exception as e:
             logger.error(f"[房间 {room_id}] 弹幕流异常: {e}")
         finally:
+            # 取消 HTTP poll 任务
+            if '_http_poll_task' in dir() and _http_poll_task and not _http_poll_task.done():
+                _http_poll_task.cancel()
+                try:
+                    await _http_poll_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             # 清理 CDP 会话
             if cdp_session:
                 try:
@@ -2907,22 +3342,21 @@ class DouyinLiveCrawler:
                         if _hp:
                             try: await _hp.close()
                             except: pass
-                # ── 主方案：CDP 被动截帧（非无头模式下页面原生 WS）──
-                # 诊断确认：抖音仅在非无头模式建立 WebSocket，headless 回退到 HTTP 轮询
-                # CDP 在网络层被动捕获页面自己的 WS 连接，对页面完全透明
+                # ── 主方案：CDP 被动截帧（浏览器原生WS，完美TLS指纹）──
+                # 抖音WAF能识别非浏览器的TLS指纹，直连WS被拒绝，CDP是唯一可靠方案
                 try:
                     await self.start_danmaku_stream(
                         room_id=room_id,
                         callback=callback,
-                        duration=1200,  # 每次运行 20 分钟，更频繁轮换
+                        duration=1200,
                         shared_context=shared_context,
+                        signing_page=signing_page,
                     )
-                    # CDP completed normally (duration expired or room ended)
-                    continue  # restart loop to reconnect
+                    continue  # CDP completed normally, restart loop to reconnect
                 except Exception as cdp_err:
                     logger.info(f"[房间 {room_id}] CDP截帧失败({str(cdp_err)[:50]}), 尝试桥接WS")
 
-                # 备用方案1：浏览器桥接模式（JS内WebSocket）
+                # ── 备用方案1：浏览器桥接模式（JS内WebSocket）──
                 if signing_page:
                     try:
                         await self.start_danmaku_bridge(
@@ -2933,18 +3367,7 @@ class DouyinLiveCrawler:
                         )
                         continue
                     except Exception as bridge_err:
-                        logger.info(f"[房间 {room_id}] 桥接WS失败({str(bridge_err)[:50]}), 尝试直连")
-
-                # 备用方案2：直连WebSocket模式
-                try:
-                    await self.start_danmaku_direct(
-                        room_id=room_id,
-                        callback=callback,
-                        duration=1200,
-                        signing_page=signing_page,
-                    )
-                except Exception as direct_err:
-                    logger.info(f"[房间 {room_id}] 所有弹幕方案均失败，等待重试")
+                        logger.info(f"[房间 {room_id}] 桥接WS失败({str(bridge_err)[:50]})")
                 _context_dead_count = 0  # 成功后重置计数
             except Exception as e:
                 err_str = str(e)

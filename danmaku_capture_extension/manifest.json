@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Danmaku WS Capture",
+  "version": "1.1.0",
+  "description": "Auto-navigate rooms and capture WebSocket danmaku",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://live.douyin.com/*",
+        "https://www.douyin.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "inject.js"
+      ],
+      "matches": [
+        "https://live.douyin.com/*",
+        "https://www.douyin.com/*"
+      ]
+    }
+  ],
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "storage"
+  ],
+  "host_permissions": [
+    "http://localhost:8888/*",
+    "https://live.douyin.com/*"
+  ]
+}

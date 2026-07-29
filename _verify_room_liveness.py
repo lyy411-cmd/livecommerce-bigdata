@@ -8,7 +8,7 @@ VMS = {'mysql': '192.168.104.100:3306'}
 USER, PWD, DB = 'root', '123456', 'livecommerce_db'
 COOKIE_FILE = r'C:\Users\MECHREVO\Desktop\星播大数据分析平台\data_pipeline\cookies\douyin_cookies.json'
 BATCH_SIZE = 8
-MAX_ROOMS = 100
+MAX_ROOMS = 500
 SCRIPT_VERSION = 3  # v3: increased limits, marks ended as finished
 
 def get_candidates():
@@ -29,8 +29,8 @@ async def verify_rooms(candidates):
     async with async_playwright() as p:
         tmp = tempfile.mkdtemp(prefix='verify_')
         try:
-            browser = await p.chromium.launch(headless=True, channel='chrome',
-                args=['--disable-blink-features=AutomationControlled', '--headless=new',
+            browser = await p.chromium.launch(headless=False, channel='chrome',
+                args=['--disable-blink-features=AutomationControlled',
                        '--disk-cache-size=1', '--no-sandbox'])
             ctx = await browser.new_context(ignore_https_errors=True)
             try:
