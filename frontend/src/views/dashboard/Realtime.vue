@@ -1,8 +1,14 @@
 <template>
   <div class="realtime">
     <div class="header-strip">
-      <div><h2>┃ 实时直播</h2></div>
-      <button class="refresh-btn" @click="fetchData">⟳ 刷新</button>
+      <div>
+        <h2>┃ 直播监控</h2>
+        <p class="header-desc">实时监控带货直播间运行状态 · 每3秒自动刷新</p>
+      </div>
+      <div class="header-actions">
+        <span class="auto-badge" :class="autoRefresh ? 'on' : 'off'">{{ autoRefresh ? '自动刷新中' : '已暂停' }}</span>
+        <button class="refresh-btn" @click="fetchData">⟳ 立即刷新</button>
+      </div>
     </div>
 
     <div class="kpi-row">
@@ -14,34 +20,49 @@
       </div>
     </div>
 
-    <div class="section-card">
+    <div class="monitor-section">
       <div class="section-header">
-        <h3>直播中 ({{ liveRooms.length }} 个)</h3>
+        <h3>在线直播间 <span class="count-badge">{{ liveRooms.length }}</span></h3>
         <div class="sort-btns">
-          <button :class="{ active: sortBy === 'viewerCount' }" @click="sortBy = 'viewerCount'">观众</button>
-          <button :class="{ active: sortBy === 'gmv' }" @click="sortBy = 'gmv'">GMV</button>
-          <button :class="{ active: sortBy === 'orderCount' }" @click="sortBy = 'orderCount'">订单</button>
+          <button :class="{ active: sortBy === 'viewerCount' }" @click="sortBy = 'viewerCount'">按观众</button>
+          <button :class="{ active: sortBy === 'gmv' }" @click="sortBy = 'gmv'">按GMV</button>
+          <button :class="{ active: sortBy === 'orderCount' }" @click="sortBy = 'orderCount'">按订单</button>
+          <button class="auto-btn" :class="{ active: autoRefresh }" @click="autoRefresh = !autoRefresh">
+            {{ autoRefresh ? '暂停' : '恢复' }}
+          </button>
         </div>
       </div>
 
       <div class="room-grid" v-if="sortedRooms.length > 0">
-        <div class="room-card" v-for="r in sortedRooms" :key="r.roomId || r.id" @click="goRoomDetail(r)" style="cursor:pointer" :style="{ borderLeft: '3px solid #00d9ff' }">
-          <div class="room-top">
+        <div class="room-card" v-for="r in sortedRooms" :key="r.roomId || r.id" @click="goRoomDetail(r)" style="cursor:pointer">
+          <div class="room-header">
             <span class="room-tag live-tag">LIVE</span>
+            <span class="room-anchor">{{ r.anchorName }}</span>
           </div>
           <h4 class="room-name">{{ r.roomName }}</h4>
-          <p class="room-anchor">{{ r.anchorName }}</p>
-          <div v-if="r.liveUrl" class="room-link" @click.stop="openLiveUrl(r.liveUrl)" style="font-size:10px;color:#00ffcc;cursor:pointer;margin:2px 0">🔗 跳转直播间</div>
           <div class="room-stats">
-            <div><span>观众</span><strong>{{ formatNum(r.viewerCount) }}</strong></div>
-            <div><span>订单</span><strong>{{ formatNum(r.orderCount) }}</strong></div>
-            <div><span>GMV</span><strong>￥{{ formatNum(r.gmv) }}</strong></div>
+            <div class="rs-item">
+              <span class="rs-label">观众</span>
+              <strong class="rs-value highlight">{{ formatNum(r.viewerCount) }}</strong>
+            </div>
+            <div class="rs-item">
+              <span class="rs-label">订单</span>
+              <strong class="rs-value">{{ formatNum(r.orderCount) }}</strong>
+            </div>
+            <div class="rs-item">
+              <span class="rs-label">GMV</span>
+              <strong class="rs-value gmv">￥{{ formatNum(r.gmv) }}</strong>
+            </div>
+          </div>
+          <div class="room-footer">
+            <span v-if="r.liveUrl" class="jump-link" @click.stop="openLiveUrl(r.liveUrl)">打开直播间 →</span>
+            <span v-else class="no-link">无链接</span>
           </div>
         </div>
       </div>
       <div v-else class="empty-state">
         <p>暂无直播中的带货直播间</p>
-        <p class="empty-hint">请在带货高峰时段 (19:00-23:00) 运行爬虫刷新数据</p>
+        <p class="empty-hint">请在带货高峰时段 (19:00-23:00) 查看</p>
       </div>
     </div>
   </div>
@@ -59,11 +80,12 @@ const openLiveUrl = (url) => { window.open(url, '_blank') }
 
 const liveRooms = ref([])
 const sortBy = ref('viewerCount')
+const autoRefresh = ref(true)
 const kpis = ref([
-  { label: '直播中', value: '...', sub: '活跃房间', color: '#00ffcc' },
-  { label: '总观众', value: '...', sub: '累计在线', color: '#00d9ff' },
-  { label: '总GMV', value: '...', sub: '实时统计', color: '#a855f7' },
-  { label: '订单数', value: '...', sub: '本时段', color: '#ffa502' }
+  { label: '直播中', value: '...', sub: '活跃房间数', color: '#00ffcc' },
+  { label: '总观众', value: '...', sub: '累计在线人数', color: '#00d9ff' },
+  { label: '总GMV', value: '...', sub: '实时成交额', color: '#a855f7' },
+  { label: '订单数', value: '...', sub: '当前时段订单', color: '#ffa502' }
 ])
 
 const sortedRooms = computed(() => [...liveRooms.value].sort((a, b) => Number(b[sortBy.value] || 0) - Number(a[sortBy.value] || 0)))
@@ -75,44 +97,30 @@ const formatNum = (n) => {
   return v.toLocaleString()
 }
 
-const getColor = () => '#00d9ff'
-
 let timer
 
 async function fetchData() {
   try {
-    // 先尝试从 rt_room_stats 获取真实爬虫数据
     let rooms = []
     try {
       const rtRes = await getRealtimeRooms().catch(() => fallback.liveRooms())
       if (rtRes?.code === 0 && rtRes?.data?.length > 0) {
         rooms = rtRes.data.map(r => ({
-          id: r.roomId,
-          roomName: r.roomName,
-          anchorName: r.anchorName,
-          category: r.category,
-          status: r.status,
-          viewerCount: r.viewerCount,
-          orderCount: r.totalOrders,
-          gmv: r.totalGmv,
-          liveUrl: r.liveUrl,
-          roomId: r.roomId
+          id: r.roomId, roomName: r.roomName, anchorName: r.anchorName,
+          category: r.category, status: r.status, viewerCount: r.viewerCount,
+          orderCount: r.totalOrders, gmv: r.totalGmv, liveUrl: r.liveUrl, roomId: r.roomId
         }))
       }
     } catch {}
-
-    // Fallback: 从 live_room 表获取
     if (rooms.length === 0) {
       const res = await getRoomPage({ page: 1, pageSize: 200 }).catch(() => fallback.liveRooms())
       const allRooms = res?.data?.records || res?.data || []
       rooms = allRooms.filter(r => r.status === 'live' && r.liveUrl).map(r => ({ ...r }))
     }
-
     liveRooms.value = rooms
     const viewers = rooms.reduce((s, r) => s + Number(r.viewerCount || 0), 0)
     const gmv = rooms.reduce((s, r) => s + Number(r.gmv || 0), 0)
     const orders = rooms.reduce((s, r) => s + Number(r.orderCount || 0), 0)
-
     kpis.value[0].value = rooms.length
     kpis.value[1].value = formatNum(viewers)
     kpis.value[2].value = '￥' + formatNum(gmv)
@@ -120,17 +128,24 @@ async function fetchData() {
   } catch {}
 }
 
-onMounted(() => { fetchData(); timer = setInterval(fetchData, 3000) })
+onMounted(() => {
+  fetchData()
+  timer = setInterval(() => { if (autoRefresh.value) fetchData() }, 3000)
+})
 onBeforeUnmount(() => clearInterval(timer))
 </script>
 
 <style scoped>
-.realtime { display: flex; flex-direction: column; gap: 18px; height: 100%; overflow-y: auto; padding-bottom: 20px; }
-
+.realtime { display: flex; flex-direction: column; gap: 16px; height: 100%; overflow-y: auto; padding-bottom: 20px; }
 .header-strip { display: flex; justify-content: space-between; align-items: flex-start; }
 .header-strip h2 { font-size: 20px; font-weight: 700; color: #e0e0e0; margin: 0; }
-.header-strip p { font-size: 12px; color: rgba(255,255,255,0.3); margin: 2px 0 0; }
+.header-desc { font-size: 11px; color: rgba(255,255,255,0.25); margin: 2px 0 0; }
+.header-actions { display: flex; align-items: center; gap: 10px; }
+.auto-badge { font-size: 10px; padding: 3px 10px; border-radius: 10px; font-weight: 500; }
+.auto-badge.on { background: rgba(0,255,204,0.1); color: #00ffcc; border: 1px solid rgba(0,255,204,0.3); }
+.auto-badge.off { background: rgba(255,255,255,0.04); color: rgba(255,255,255,0.3); border: 1px solid rgba(255,255,255,0.08); }
 .refresh-btn { background: rgba(0,255,204,0.08); color: #00ffcc; border: 1px solid rgba(0,255,204,0.2); padding: 5px 14px; border-radius: 5px; cursor: pointer; font-size: 12px; }
+.refresh-btn:hover { background: rgba(0,255,204,0.15); }
 
 .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
 .kpi-card { background: rgba(15,20,30,0.5); border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 16px; position: relative; overflow: hidden; }
@@ -139,26 +154,34 @@ onBeforeUnmount(() => clearInterval(timer))
 .kpi-value { font-size: 26px; font-weight: 700; color: #f0f0f0; margin: 6px 0; font-family: 'Courier New', monospace; }
 .kpi-sub { font-size: 10px; color: rgba(255,255,255,0.2); }
 
-.section-card { background: rgba(15,20,30,0.4); border: 1px solid rgba(255,255,255,0.05); border-radius: 10px; padding: 16px; }
+.monitor-section { background: rgba(15,20,30,0.4); border: 1px solid rgba(255,255,255,0.05); border-radius: 10px; padding: 16px; }
 .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
-.section-header h3 { font-size: 14px; color: rgba(255,255,255,0.6); font-weight: 600; margin: 0; }
+.section-header h3 { font-size: 14px; color: rgba(255,255,255,0.6); font-weight: 600; margin: 0; display: flex; align-items: center; gap: 8px; }
+.count-badge { font-size: 11px; padding: 1px 8px; border-radius: 8px; background: rgba(0,255,204,0.1); color: #00ffcc; font-weight: 600; }
 .sort-btns { display: flex; gap: 4px; }
-.sort-btns button { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); color: rgba(255,255,255,0.4); padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; }
+.sort-btns button { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); color: rgba(255,255,255,0.4); padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; transition: all 0.2s; }
 .sort-btns button.active { background: rgba(0,255,204,0.1); border-color: #00ffcc; color: #00ffcc; }
+.auto-btn { margin-left: 6px; }
 
 .room-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
-.room-card { background: rgba(15,20,30,0.5); padding: 14px; border-radius: 8px; transition: all 0.2s; }
-.room-card:hover { transform: translateY(-2px); background: rgba(15,20,30,0.7); }
-.room-top { display: flex; gap: 6px; margin-bottom: 6px; }
+.room-card { background: rgba(15,20,30,0.6); border: 1px solid rgba(255,255,255,0.06); padding: 14px; border-radius: 8px; transition: all 0.2s; }
+.room-card:hover { transform: translateY(-2px); border-color: rgba(0,255,204,0.2); background: rgba(15,20,30,0.8); }
+.room-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
 .room-tag { font-size: 9px; padding: 1px 6px; border-radius: 3px; font-weight: 700; }
 .live-tag { background: #ff4757; color: #fff; animation: blink 1.5s infinite; }
 @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
-.room-name { font-size: 13px; color: #e0e0e0; margin: 4px 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.room-anchor { font-size: 11px; color: rgba(255,255,255,0.35); margin-bottom: 8px; }
-.room-stats { display: flex; gap: 12px; }
-.room-stats div { display: flex; flex-direction: column; }
-.room-stats span { font-size: 9px; color: rgba(255,255,255,0.25); }
-.room-stats strong { font-size: 13px; color: rgba(255,255,255,0.7); font-family: 'Courier New', monospace; }
+.room-anchor { font-size: 11px; color: rgba(255,255,255,0.35); }
+.room-name { font-size: 13px; color: #e0e0e0; margin: 4px 0 10px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.room-stats { display: flex; gap: 8px; }
+.rs-item { display: flex; flex-direction: column; flex: 1; }
+.rs-label { font-size: 9px; color: rgba(255,255,255,0.25); }
+.rs-value { font-size: 13px; color: rgba(255,255,255,0.7); font-family: 'Courier New', monospace; }
+.rs-value.highlight { color: #00ffcc; }
+.rs-value.gmv { color: #ffa502; }
+.room-footer { margin-top: 8px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.04); }
+.jump-link { font-size: 11px; color: #00ffcc; cursor: pointer; }
+.jump-link:hover { text-decoration: underline; }
+.no-link { font-size: 11px; color: rgba(255,255,255,0.15); }
 .empty-state { text-align: center; padding: 40px 20px; }
 .empty-state p { color: rgba(255,255,255,0.4); font-size: 14px; margin: 4px 0; }
 .empty-state .empty-hint { font-size: 11px; color: rgba(255,255,255,0.2); }

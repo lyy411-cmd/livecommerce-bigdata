@@ -57,6 +57,7 @@ export const getGmvTrend = (months = 12) => request.get('/datavis/dashboard/gmv-
 export const getCategoryDistribution = () => request.get('/datavis/dashboard/platform-distribution')
 export const getCategoryRank = () => request.get('/datavis/dashboard/category-rank')
 export const getAnchorRank = (limit = 10) => request.get('/datavis/dashboard/anchor-rank', { params: { limit } })
+export const getConversionDistribution = () => request.get('/datavis/dashboard/conversion-distribution')
 export const getGeoDistribution = () => request.get('/datavis/dashboard/geo-distribution')
 export const getRealtimeData = () => request.get('/datavis/dashboard/realtime')
 export const getActivities = () => request.get('/datavis/dashboard/activities')

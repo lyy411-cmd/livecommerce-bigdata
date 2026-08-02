@@ -252,17 +252,21 @@ def init_database():
 def query_mysql(sql, params=None):
     if not check_mysql_available():
         return None
+    conn = None
     try:
         import pymysql
         conn = pymysql.connect(host=VMS['mysql'].split(':')[0], port=3306, user=USER, password=PWD, database=DB_NAME, charset='utf8mb4', connect_timeout=5)
         cursor = conn.cursor(pymysql.cursors.DictCursor)
         cursor.execute(sql, params or ())
         results = cursor.fetchall()
-        conn.close()
         return results
     except Exception as e:
         print(f"  [MySQL ERR] {e}")
         return None
+    finally:
+        if conn:
+            try: conn.close()
+            except: pass
 
 
 def get_flink_jobs():
@@ -403,18 +407,22 @@ def order_simulator_loop():
     order_counter = [20000]
 
     # 从数据库已有最大订单号开始
+    conn = None
     try:
         conn = pymysql.connect(host=VMS['mysql'].split(':')[0], port=3306, user=USER, password=PWD, database=DB_NAME, charset='utf8mb4', connect_timeout=5)
         cur = conn.cursor()
         cur.execute("SELECT IFNULL(MAX(CAST(SUBSTRING(order_no, 6) AS UNSIGNED)), 0) + 1 FROM order_info")
         order_counter[0] = max(cur.fetchone()[0], 20000)
-        conn.close()
     except: pass
+    finally:
+        if conn:
+            try: conn.close()
+            except: pass
 
     print("  [OrderSim] Batch-order simulator started (concurrent lifecycle threads)")
     while True:
         try:
-            batch_size = random.choices([1, 2, 3, 4, 5], weights=[15, 30, 30, 15, 10])[0]
+            batch_size = random.choices([1, 2, 3], weights=[30, 45, 25])[0]
             spawn_gap = random.uniform(0.3, 1.5) if batch_size > 1 else 0
 
             for i in range(batch_size):
@@ -428,13 +436,16 @@ def order_simulator_loop():
                 now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
                 with order_sim_lock:
-                    conn = pymysql.connect(host=VMS['mysql'].split(':')[0], port=3306, user=USER, password=PWD, database=DB_NAME, charset='utf8mb4', connect_timeout=5)
-                    cur = conn.cursor()
-                    cur.execute("INSERT INTO order_info (order_no, product_name, room_name, username, quantity, total_amount, platform, status, create_time) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',NOW())",
-                        (order_no, prod[0], prod[1], user, qty, amount, plat))
-                    oid = cur.lastrowid
-                    conn.commit()
-                    conn.close()
+                    _conn = pymysql.connect(host=VMS['mysql'].split(':')[0], port=3306, user=USER, password=PWD, database=DB_NAME, charset='utf8mb4', connect_timeout=5)
+                    try:
+                        cur = _conn.cursor()
+                        cur.execute("INSERT INTO order_info (order_no, product_name, room_name, username, quantity, total_amount, platform, status, create_time) VALUES (%s,%s,%s,%s,%s,%s,%s,'pending',NOW())",
+                            (order_no, prod[0], prod[1], user, qty, amount, plat))
+                        oid = cur.lastrowid
+                        _conn.commit()
+                    finally:
+                        try: _conn.close()
+                        except: pass
 
                 _broadcast_event({'type': 'new_order', 'orderNo': order_no, 'oid': oid,
                     'productName': prod[0], 'roomName': prod[1], 'username': user,
@@ -455,7 +466,7 @@ def order_simulator_loop():
 
             active = threading.active_count()
             print(f"  [OrderSim] batch {batch_size} orders created | total active threads: ~{active}")
-            time.sleep(random.randint(3, 12))
+            time.sleep(random.randint(6, 18))
 
         except Exception as e:
             print(f"  [OrderSim] Error: {e}")
@@ -657,6 +668,17 @@ class APIHandler(BaseHTTPRequestHandler):
                 'totalOrders': int(r['total_orders'] or 0), 'avgConversion': float(r['avg_conversion'] or 0)
             } for r in rows] if rows else []
             self._send({'code': 0, 'data': data})
+
+        elif p == '/api/datavis/dashboard/conversion-distribution':
+            """转化率分布 - 查询所有主播的转化率并按区间统计"""
+            rows = query_mysql("SELECT avg_conversion FROM anchor WHERE deleted=0 AND avg_conversion > 0")
+            all_vals = [float(r['avg_conversion']) for r in (rows or [])]
+            bins = [
+                ('0-1%', 0, 1), ('1-2%', 1, 2), ('2-4%', 2, 4),
+                ('4-6%', 4, 6), ('6-10%', 6, 10), ('>10%', 10, 9999)
+            ]
+            data = [{'label': label, 'count': sum(1 for v in all_vals if lo <= v < hi)} for label, lo, hi in bins]
+            self._send({'code': 0, 'data': data, 'total': len(all_vals)})
 
         elif p == '/api/datavis/dashboard/geo-distribution':
             # Try to get geo from danmaku or orders, fallback to empty
@@ -890,7 +912,8 @@ class APIHandler(BaseHTTPRequestHandler):
             qs = parse_qs(urlparse(self.path).query)
             keyword = (qs.get('keyword', [''])[0] or '').strip()
             category_f = (qs.get('category', [''])[0] or '').strip()
-            if not keyword and not category_f:
+            tier_f = (qs.get('tier', [''])[0] or '').strip()
+            if not keyword and not category_f and not tier_f:
                 self._send({'code': 0, 'data': []})
                 return
             where = "WHERE deleted=0 AND anchor_name IS NOT NULL AND anchor_name != ''"
@@ -902,6 +925,15 @@ class APIHandler(BaseHTTPRequestHandler):
             if category_f:
                 where += " AND category = %s"
                 params.append(category_f)
+            # Tier filter: S(>=10000), A(>=500), B(>=50), C(<50)
+            if tier_f == 'S':
+                where += " AND viewer_count >= 10000"
+            elif tier_f == 'A':
+                where += " AND viewer_count >= 500 AND viewer_count < 10000"
+            elif tier_f == 'B':
+                where += " AND viewer_count >= 50 AND viewer_count < 500"
+            elif tier_f == 'C':
+                where += " AND viewer_count < 50"
             rows = query_mysql(
                 f"SELECT anchor_name, category, "
                 f"  COUNT(*) as room_count, "
@@ -915,7 +947,7 @@ class APIHandler(BaseHTTPRequestHandler):
                 f"FROM live_room {where} "
                 f"GROUP BY anchor_name, category "
                 f"ORDER BY is_live DESC, max_viewers DESC "
-                f"LIMIT 50", params)
+                f"LIMIT 100", params)
             data = [{
                 'anchorName': r['anchor_name'],
                 'category': r.get('category', ''),
@@ -4440,9 +4472,9 @@ def main():
     backend_thread.start()
     time.sleep(0.5)
 
-    # Order simulator disabled - orders now come from real crawler data
-    # order_thread = threading.Thread(target=order_simulator_loop, daemon=True)
-    # order_thread.start()
+    # Order simulator - 实时订单模拟（每个订单独立线程跑生命周期）
+    order_thread = threading.Thread(target=order_simulator_loop, daemon=True)
+    order_thread.start()
 
     # === 初始化实时数据管道 ===
     global _kafka_producer, _kafka_consumer, _ws_server, _ws_pusher
