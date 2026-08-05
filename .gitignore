@@ -74,6 +74,10 @@ debug_page.txt
 ks_search_test.txt
 ks_test_result.txt
 cluster_log*.txt
+push_result.txt
+
+# 清理临时目录
+.trash_cleanup/
 
 # Chrome扩展开发临时产物（如需提交请移除此行）
 # chrome_extension/
