@@ -53,6 +53,12 @@ DB_NAME = 'livecommerce_db'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BACKEND_PORT = 8080
 
+# === 实时弹幕监控轮询配置 ===
+# 控制一轮监控覆盖所有直播间的总时长（秒），要求 1 小时内全部覆盖
+DANMAKU_MONITOR_BATCH_SIZE = 8   # 每批同时监控的房间数
+DANMAKU_MONITOR_DURATION = 100   # 每个房间监控时长（秒）
+DANMAKU_MONITOR_STAGGER = 5      # 同批次内房间启动间隔（秒）
+
 # 管道执行状态
 PIPELINE_STATS = {
     'collects': 0, 'last_collect': '--', 'source_type': 'simulated',
@@ -2757,8 +2763,9 @@ if __name__ == '__main__':
             else:
                 print(f"  [StatusCheck] scrape_rooms.py failed: {result.stderr[:100]}", flush=True)
 
-            # 第二步: Playwright验证已禁用（cookie问题导致所有房间被误标为ended）
-            # 弹幕采集器的API验证已足够可靠
+            # 第二步: Playwright 验证已禁用（_verify_room_liveness.py 在失败时会默认标 ended，
+            # 会把所有直播间误判为下播，因此不在这里运行）
+            # 弹幕采集器的 API 验证 + 关键词过滤是当前主要手段。
 
             # 第三步: 统计最终状态
             try:
@@ -4035,11 +4042,11 @@ def _auto_danmaku_collector():
                     # 让浏览器原生JS建立WebSocket，CDP网络层被动截帧
                     # 完全绕开DEVICE_BLOCKED（因为是页面自己的WS连接）
                     print(f"  [Danmaku-CDP] {name}: 启动CDP弹幕流 "
-                          f"(web_rid={rid}, duration=180s)")
+                          f"(web_rid={rid}, duration={DANMAKU_MONITOR_DURATION}s)")
                     await crawler_instance.start_danmaku_stream(
                         room_id=rid,
                         callback=on_danmaku,
-                        duration=180,
+                        duration=DANMAKU_MONITOR_DURATION,
                         shared_context=crawler_instance._context,
                     )
                     # ── 流结束后记录弹幕统计（不直接标记房间状态，由API状态检查器处理）──
@@ -4152,8 +4159,8 @@ def _auto_danmaku_collector():
                 _monitor_rooms = rooms  # 全部房间顺序批次处理
                 for r in _monitor_rooms:
                     r[_monitored_key] = True
-                print(f"  [Danmaku] Will monitor {len(_monitor_rooms)} rooms in sequential batches of 4 "
-                      f"(180s/stream, 10s stagger, VM-safe)", flush=True)
+                print(f"  [Danmaku] Will monitor {len(_monitor_rooms)} rooms in sequential batches of {DANMAKU_MONITOR_BATCH_SIZE} "
+                      f"({DANMAKU_MONITOR_DURATION}s/stream, {DANMAKU_MONITOR_STAGGER}s stagger, target <60min)", flush=True)
                 # 监控循环：每5秒检查刷新信号，25分钟自动重启轮换
                 # ── 定期重新验证直播状态（每2分钟）──
                 # 在监控期间快速捕获已结束的房间，从"正在直播"列表中移除
@@ -4219,8 +4226,8 @@ def _auto_danmaku_collector():
                 _cycle_timeout = 5400  # 90分钟自动重启
                 _batch_done = False
 
-                # ── 顺序批次处理：每批4个房间，完成后再启动下一批 ──
-                for _batch_i in range(0, len(_monitor_rooms), 4):
+                    # ── 顺序批次处理：每批 N 个房间，完成后再启动下一批 ──
+                for _batch_i in range(0, len(_monitor_rooms), DANMAKU_MONITOR_BATCH_SIZE):
                     # 超时检查
                     if time.time() - _cycle_start > _cycle_timeout:
                         print(f"  [Danmaku] Cycle timeout ({_cycle_timeout}s) — restarting", flush=True)
@@ -4232,18 +4239,18 @@ def _auto_danmaku_collector():
                         except: pass
                         break
 
-                    _batch = _monitor_rooms[_batch_i:_batch_i + 4]
+                    _batch = _monitor_rooms[_batch_i:_batch_i + DANMAKU_MONITOR_BATCH_SIZE]
                     _batch_tasks = []
                     for _bi, _br in enumerate(_batch):
                         _global_idx = _batch_i + _bi + 1
                         async def _staggered_mon(r=_br, idx=_global_idx):
-                            await asyncio.sleep(_bi * 10)  # 10s stagger within batch
+                            await asyncio.sleep(_bi * DANMAKU_MONITOR_STAGGER)  # stagger within batch
                             await monitor_one(crawler, r, idx, len(_monitor_rooms))
                         _bt = asyncio.create_task(_staggered_mon())
                         _batch_tasks.append(_bt)
 
-                    _batch_num = _batch_i // 4 + 1
-                    _total_batches = (len(_monitor_rooms) + 3) // 4
+                    _batch_num = _batch_i // DANMAKU_MONITOR_BATCH_SIZE + 1
+                    _total_batches = (len(_monitor_rooms) + DANMAKU_MONITOR_BATCH_SIZE - 1) // DANMAKU_MONITOR_BATCH_SIZE
                     _rids = [r.get('web_rid', r.get('room_id', '?')) for r in _batch]
                     print(f"  [Batch {_batch_num}/{_total_batches}] "
                           f"Rooms: {', '.join(str(x) for x in _rids)}", flush=True)
